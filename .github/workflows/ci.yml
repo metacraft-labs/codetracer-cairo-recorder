@@ -42,6 +42,22 @@ jobs:
       - name: Configure Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
+      - name: Fetch Cairo corelib
+        run: |
+          set -euo pipefail
+          # Extract the cairo-lang version from Cargo.toml so the corelib
+          # always matches the pinned compiler crates.
+          CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml \
+            | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Cairo version: $CAIRO_VERSION"
+          curl -fsSL \
+            "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
+            -o cairo-src.tar.gz
+          tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
+          mv "cairo-${CAIRO_VERSION}/corelib" corelib
+          rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
+          echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "$GITHUB_ENV"
+
       - name: Build all targets
         run: nix develop --command cargo build --all-targets
 
