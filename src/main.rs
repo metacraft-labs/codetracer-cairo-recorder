@@ -122,10 +122,7 @@ fn main() -> Result<()> {
         Commands::TraceStarknet(args) => trace_starknet(args),
         Commands::Replay(args) => replay(args),
         Commands::Version => {
-            println!(
-                "codetracer-cairo-recorder {}",
-                env!("CARGO_PKG_VERSION")
-            );
+            println!("codetracer-cairo-recorder {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }

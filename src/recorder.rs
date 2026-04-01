@@ -16,11 +16,7 @@ use crate::tracer::CairoTracer;
 /// Reads the Cairo source file at `source_path`, compiles it through the
 /// Sierra/CASM pipeline, executes it, captures the trace, and writes
 /// CodeTracer trace files to `out_dir`.
-pub fn record(
-    source_path: &Path,
-    out_dir: &Path,
-    format: TraceEventsFileFormat,
-) -> Result<()> {
+pub fn record(source_path: &Path, out_dir: &Path, format: TraceEventsFileFormat) -> Result<()> {
     let source_code = std::fs::read_to_string(source_path)
         .with_context(|| format!("failed to read source file: {}", source_path.display()))?;
 

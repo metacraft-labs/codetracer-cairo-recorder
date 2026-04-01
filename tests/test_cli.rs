@@ -19,10 +19,7 @@ fn test_help_flag() {
 
 #[test]
 fn test_version_subcommand() {
-    let output = cargo_bin()
-        .arg("version")
-        .output()
-        .expect("failed to run");
+    let output = cargo_bin().arg("version").output().expect("failed to run");
     assert!(output.status.success(), "version should succeed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

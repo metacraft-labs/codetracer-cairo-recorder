@@ -8,17 +8,17 @@ use std::path::{Path, PathBuf};
 
 use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer::trace_writer::TraceWriter;
-use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
-use eyre::{Context, Result, eyre};
+use codetracer_trace_writer::{create_trace_writer, TraceEventsFileFormat};
+use eyre::{eyre, Context, Result};
 
-use cairo_lang_compiler::CompilerConfig;
 use cairo_lang_compiler::db::RootDatabase;
 use cairo_lang_compiler::project::setup_project;
+use cairo_lang_compiler::CompilerConfig;
 use cairo_lang_filesystem::db::init_dev_corelib;
 use cairo_lang_filesystem::ids::CrateInput;
 use cairo_lang_lowering::optimizations::config::Optimizations;
 use cairo_lang_lowering::utils::InliningStrategy;
-use cairo_lang_runner::{SierraCasmRunner, RunResultValue};
+use cairo_lang_runner::{RunResultValue, SierraCasmRunner};
 use cairo_lang_sierra::program::Program as SierraProgram;
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 
@@ -50,11 +50,12 @@ impl CairoTracer {
             ..CompilerConfig::default()
         };
 
-        let corelib_path = find_corelib_path()
-            .ok_or_else(|| eyre!(
+        let corelib_path = find_corelib_path().ok_or_else(|| {
+            eyre!(
                 "Could not find Cairo corelib. Set CAIRO_CORELIB_DIR env var \
                  or place corelib/src next to the crate root."
-            ))?;
+            )
+        })?;
 
         let mut db = RootDatabase::builder()
             .with_optimizations(Optimizations::enabled_with_default_movable_functions(
@@ -87,9 +88,9 @@ impl CairoTracer {
         // -- 3. Create and run via SierraCasmRunner -----------------------------------
         let runner = SierraCasmRunner::new(
             sierra_program.clone(),
-            None,  // metadata_config
-            OrderedHashMap::default(),  // starknet_contracts_info
-            None,  // run_profiler
+            None,                      // metadata_config
+            OrderedHashMap::default(), // starknet_contracts_info
+            None,                      // run_profiler
         )
         .map_err(|e| eyre!("Failed to create SierraCasmRunner: {e}"))?;
 
@@ -106,9 +107,9 @@ impl CairoTracer {
         let result = runner
             .run_function_with_starknet_context(
                 main_func,
-                vec![],   // args
-                None,     // available_gas
-                Default::default(),  // starknet_state
+                vec![],             // args
+                None,               // available_gas
+                Default::default(), // starknet_state
             )
             .map_err(|e| eyre!("Execution failed: {e}"))?;
 
@@ -170,20 +171,13 @@ impl CairoTracer {
         tracer.felt_type_id = Some(felt_type_id);
 
         // -- 8. Emit trace events from source analysis --------------------------------
-        tracer.emit_source_trace(
-            source_path,
-            &source_map,
-            &sierra_program,
-            &return_values,
-        )?;
+        tracer.emit_source_trace(source_path, &source_map, &sierra_program, &return_values)?;
 
         // -- 9. Finish writing --------------------------------------------------------
-        TraceWriter::finish_writing_trace_events(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
         TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
             .map_err(|e| eyre!("{e}"))?;
-        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer)
-            .map_err(|e| eyre!("{e}"))?;
+        TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
 
         Ok(())
     }
@@ -271,11 +265,7 @@ impl CairoTracer {
                 continue;
             }
 
-            TraceWriter::register_step(
-                &mut *self.writer,
-                source_path,
-                Line(line_num as i64),
-            );
+            TraceWriter::register_step(&mut *self.writer, source_path, Line(line_num as i64));
 
             // Emit variable values from real VM return values (not source evaluation).
             for (name, line) in &binding_names {

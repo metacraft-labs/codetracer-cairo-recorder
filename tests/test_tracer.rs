@@ -18,12 +18,8 @@ fn test_programs_dir() -> PathBuf {
 
 /// Helper: run the tracer on a Cairo source file and return the output directory.
 fn run_tracer_on_file(source_path: &Path, out_dir: &Path) {
-    codetracer_cairo_recorder::recorder::record(
-        source_path,
-        out_dir,
-        TraceEventsFileFormat::Json,
-    )
-    .expect("trace_program should succeed");
+    codetracer_cairo_recorder::recorder::record(source_path, out_dir, TraceEventsFileFormat::Json)
+        .expect("trace_program should succeed");
 }
 
 /// Helper: parse the trace events JSON from the output directory.
@@ -177,10 +173,8 @@ fn test_cairo_step_events() {
     let events = load_trace_events(&out_dir);
 
     // Count Step events.
-    let step_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e.get("Step").is_some())
-        .collect();
+    let step_events: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e.get("Step").is_some()).collect();
 
     assert!(
         step_events.len() >= 3,
@@ -195,7 +189,9 @@ fn test_cairo_step_events() {
             step.get("path_id").is_some(),
             "Step event should have path_id field"
         );
-        let line = step["line"].as_i64().expect("Step line should be an integer");
+        let line = step["line"]
+            .as_i64()
+            .expect("Step line should be an integer");
         assert!(line > 0, "Step line should be positive, got {}", line);
         // Lines should be within the source file range (12 lines).
         assert!(
@@ -349,14 +345,11 @@ fn test_cairo_tracer_paths_valid() {
     let source_path = test_programs_dir().join("flow_test.cairo");
     run_tracer_on_file(&source_path, &out_dir);
 
-    let paths_content = std::fs::read_to_string(out_dir.join("trace_paths.json"))
-        .expect("failed to read paths");
+    let paths_content =
+        std::fs::read_to_string(out_dir.join("trace_paths.json")).expect("failed to read paths");
     let paths: serde_json::Value =
         serde_json::from_str(&paths_content).expect("trace_paths.json should be valid JSON");
-    assert!(
-        paths.is_array(),
-        "trace_paths.json should be a JSON array"
-    );
+    assert!(paths.is_array(), "trace_paths.json should be a JSON array");
     let paths_arr = paths.as_array().unwrap();
     assert!(
         !paths_arr.is_empty(),
@@ -489,10 +482,7 @@ fn test_cairo_cli_record() {
     assert!(!events.is_empty(), "CLI trace should have events");
 
     let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
-    assert!(
-        step_count > 0,
-        "CLI trace should contain Step events"
-    );
+    assert!(step_count > 0, "CLI trace should contain Step events");
 }
 
 // ===========================================================================
@@ -518,12 +508,18 @@ fn test_parse_mock_snforge_trace() {
     assert_eq!(entries.len(), 6, "mock trace should have 6 entries");
 
     // Verify entry types in order.
-    assert!(matches!(&entries[0], TraceEntry::ContractCall { selector, .. } if selector == "increase_balance"));
+    assert!(
+        matches!(&entries[0], TraceEntry::ContractCall { selector, .. } if selector == "increase_balance")
+    );
     assert!(matches!(&entries[1], TraceEntry::StorageRead { value, .. } if value == "0"));
-    assert!(matches!(&entries[2], TraceEntry::StorageWrite { old_value, new_value, .. }
-        if old_value == "0" && new_value == "42"));
+    assert!(
+        matches!(&entries[2], TraceEntry::StorageWrite { old_value, new_value, .. }
+        if old_value == "0" && new_value == "42")
+    );
     assert!(matches!(&entries[3], TraceEntry::Event { contract, .. } if contract == "0x2"));
-    assert!(matches!(&entries[4], TraceEntry::ContractCall { selector, .. } if selector == "get_balance"));
+    assert!(
+        matches!(&entries[4], TraceEntry::ContractCall { selector, .. } if selector == "get_balance")
+    );
     assert!(matches!(&entries[5], TraceEntry::StorageRead { value, .. } if value == "42"));
 }
 
