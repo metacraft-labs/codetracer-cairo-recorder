@@ -8,12 +8,12 @@
 
 use std::path::{Path, PathBuf};
 
-use eyre::{Context, Result, eyre};
+use eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer::trace_writer::TraceWriter;
-use codetracer_trace_writer::{TraceEventsFileFormat, create_trace_writer};
+use codetracer_trace_writer::{create_trace_writer, TraceEventsFileFormat};
 
 // ---------------------------------------------------------------------------
 // Trace entry types
@@ -257,8 +257,7 @@ pub fn write_starknet_trace(
         .map_err(|e| eyre!("{e}"))?;
     TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path)
         .map_err(|e| eyre!("{e}"))?;
-    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path)
-        .map_err(|e| eyre!("{e}"))?;
+    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).map_err(|e| eyre!("{e}"))?;
 
     TraceWriter::start(&mut *writer, trace_path, Line(1));
 
@@ -272,12 +271,8 @@ pub fn write_starknet_trace(
                 TraceWriter::register_step(&mut *writer, trace_path, Line(*line as i64));
             }
             TraceEvent::Call { name } => {
-                let fn_id = TraceWriter::ensure_function_id(
-                    &mut *writer,
-                    name,
-                    trace_path,
-                    Line(1),
-                );
+                let fn_id =
+                    TraceWriter::ensure_function_id(&mut *writer, name, trace_path, Line(1));
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
             }
             TraceEvent::Return => {
@@ -586,10 +581,7 @@ mod tests {
             .join("test-programs/starknet/mock_trace.json");
         let entries = parse_snforge_trace(&trace_path).unwrap();
 
-        assert!(
-            !entries.is_empty(),
-            "mock trace should have entries"
-        );
+        assert!(!entries.is_empty(), "mock trace should have entries");
 
         // First entry should be a contract call.
         assert!(
