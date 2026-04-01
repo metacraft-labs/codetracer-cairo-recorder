@@ -366,8 +366,8 @@ fn parse_return_expression(source: &str) -> Vec<String> {
             let mut fn_end = i;
 
             // Find the matching closing brace.
-            for j in fn_start..lines.len() {
-                for ch in lines[j].chars() {
+            for (j, line) in lines.iter().enumerate().skip(fn_start) {
+                for ch in line.chars() {
                     if ch == '{' {
                         brace_depth += 1;
                     } else if ch == '}' {
