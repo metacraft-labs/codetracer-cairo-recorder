@@ -1,0 +1,45 @@
+{
+  "test_name": "test_increase_balance",
+  "contract_address": "0x1",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0x2",
+      "selector": "increase_balance",
+      "calldata": ["42"]
+    },
+    {
+      "type": "storage_read",
+      "contract": "0x2",
+      "key": "balance",
+      "value": "0"
+    },
+    {
+      "type": "storage_write",
+      "contract": "0x2",
+      "key": "balance",
+      "old_value": "0",
+      "new_value": "42"
+    },
+    {
+      "type": "event",
+      "contract": "0x2",
+      "keys": ["BalanceIncreased"],
+      "data": ["0x1", "42", "42"]
+    },
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0x2",
+      "selector": "get_balance",
+      "calldata": []
+    },
+    {
+      "type": "storage_read",
+      "contract": "0x2",
+      "key": "balance",
+      "value": "42"
+    }
+  ]
+}

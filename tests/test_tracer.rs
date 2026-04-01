@@ -494,3 +494,257 @@ fn test_cairo_cli_record() {
         "CLI trace should contain Step events"
     );
 }
+
+// ===========================================================================
+// StarkNet trace tests
+// ===========================================================================
+
+/// Helper: path to the starknet test-programs directory.
+fn starknet_test_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-programs/starknet")
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: Parse mock snforge trace file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_parse_mock_snforge_trace() {
+    use codetracer_cairo_recorder::starknet::{parse_snforge_trace, TraceEntry};
+
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+    let entries = parse_snforge_trace(&trace_path).expect("should parse mock trace");
+
+    assert_eq!(entries.len(), 6, "mock trace should have 6 entries");
+
+    // Verify entry types in order.
+    assert!(matches!(&entries[0], TraceEntry::ContractCall { selector, .. } if selector == "increase_balance"));
+    assert!(matches!(&entries[1], TraceEntry::StorageRead { value, .. } if value == "0"));
+    assert!(matches!(&entries[2], TraceEntry::StorageWrite { old_value, new_value, .. }
+        if old_value == "0" && new_value == "42"));
+    assert!(matches!(&entries[3], TraceEntry::Event { contract, .. } if contract == "0x2"));
+    assert!(matches!(&entries[4], TraceEntry::ContractCall { selector, .. } if selector == "get_balance"));
+    assert!(matches!(&entries[5], TraceEntry::StorageRead { value, .. } if value == "42"));
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: Verify contract calls are captured in conversion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_starknet_contract_calls_captured() {
+    use codetracer_cairo_recorder::starknet::{
+        convert_snforge_trace, parse_snforge_trace, TraceEvent,
+    };
+
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+    let entries = parse_snforge_trace(&trace_path).unwrap();
+    let events = convert_snforge_trace(&entries);
+
+    let call_names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Call { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        call_names.contains(&"0x2::increase_balance"),
+        "should capture increase_balance call, got: {:?}",
+        call_names
+    );
+    assert!(
+        call_names.contains(&"0x2::get_balance"),
+        "should capture get_balance call, got: {:?}",
+        call_names
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 12: Verify storage reads/writes are captured
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_starknet_storage_ops_captured() {
+    use codetracer_cairo_recorder::starknet::{
+        convert_snforge_trace, parse_snforge_trace, TraceEvent,
+    };
+
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+    let entries = parse_snforge_trace(&trace_path).unwrap();
+    let events = convert_snforge_trace(&entries);
+
+    let call_names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Call { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        call_names.contains(&"0x2::storage_read"),
+        "should capture storage_read, got: {:?}",
+        call_names
+    );
+    assert!(
+        call_names.contains(&"0x2::storage_write"),
+        "should capture storage_write, got: {:?}",
+        call_names
+    );
+
+    // Verify the storage write captured old and new values.
+    let variable_pairs: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Variable { name, value } => Some((name.as_str(), value.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        variable_pairs.contains(&("old_value", "0")),
+        "should capture old_value=0"
+    );
+    assert!(
+        variable_pairs.contains(&("new_value", "42")),
+        "should capture new_value=42"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 13: Verify events are captured
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_starknet_events_captured() {
+    use codetracer_cairo_recorder::starknet::{
+        convert_snforge_trace, parse_snforge_trace, TraceEvent,
+    };
+
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+    let entries = parse_snforge_trace(&trace_path).unwrap();
+    let events = convert_snforge_trace(&entries);
+
+    let call_names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Call { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        call_names.contains(&"0x2::emit_event"),
+        "should capture emit_event, got: {:?}",
+        call_names
+    );
+
+    // Verify event keys and data are captured.
+    let variable_pairs: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Variable { name, value } => Some((name.as_str(), value.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        variable_pairs.contains(&("event_keys", "[BalanceIncreased]")),
+        "should capture event keys"
+    );
+    assert!(
+        variable_pairs.contains(&("event_data", "[0x1, 42, 42]")),
+        "should capture event data"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: Verify conversion to CodeTracer format produces valid output
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_starknet_codetracer_output() {
+    use codetracer_cairo_recorder::starknet::{parse_snforge_trace, write_starknet_trace};
+
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("starknet-traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+    let entries = parse_snforge_trace(&trace_path).unwrap();
+
+    write_starknet_trace(
+        &trace_path,
+        &entries,
+        &out_dir,
+        codetracer_trace_writer::TraceEventsFileFormat::Json,
+    )
+    .expect("write_starknet_trace should succeed");
+
+    // Verify the three output files exist and are non-empty.
+    for filename in &["trace.bin", "trace_metadata.json", "trace_paths.json"] {
+        let path = out_dir.join(filename);
+        assert!(path.exists(), "{} should exist", filename);
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size > 0, "{} should be non-empty", filename);
+    }
+
+    // Verify trace.bin is valid JSON with events.
+    let events = load_trace_events(&out_dir);
+    assert!(!events.is_empty(), "starknet trace should have events");
+
+    let step_count = events.iter().filter(|e| e.get("Step").is_some()).count();
+    assert!(
+        step_count >= 6,
+        "starknet trace should have at least 6 Step events (one per entry), got {}",
+        step_count
+    );
+
+    let call_count = events.iter().filter(|e| e.get("Call").is_some()).count();
+    assert!(
+        call_count >= 6,
+        "starknet trace should have at least 6 Call events, got {}",
+        call_count
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: CLI trace-starknet subcommand
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_trace_starknet() {
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let out_dir = tmp_dir.path().join("cli-starknet-traces");
+    let trace_path = starknet_test_dir().join("mock_trace.json");
+
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "run",
+            "--quiet",
+            "--",
+            "trace-starknet",
+            trace_path.to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("failed to run");
+
+    assert!(
+        output.status.success(),
+        "trace-starknet should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(out_dir.join("trace.bin").exists());
+    assert!(out_dir.join("trace_metadata.json").exists());
+    assert!(out_dir.join("trace_paths.json").exists());
+
+    let events = load_trace_events(&out_dir);
+    assert!(!events.is_empty(), "CLI starknet trace should have events");
+}
