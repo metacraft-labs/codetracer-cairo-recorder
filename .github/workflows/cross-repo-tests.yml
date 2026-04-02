@@ -211,6 +211,21 @@ jobs:
           echo "{\"codetracer.runnablePath\": \"$CT_BIN\"}" > "$SETTINGS"
           echo "Patched runnablePath to: $CT_BIN"
 
+      - name: Fetch Cairo corelib
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml \
+            | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Cairo version: $CAIRO_VERSION"
+          curl -fsSL \
+            "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
+            -o cairo-src.tar.gz
+          tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
+          mv "cairo-${CAIRO_VERSION}/corelib" corelib
+          rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
+          echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "$GITHUB_ENV"
+
       - name: Record Cairo trace fixture
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
