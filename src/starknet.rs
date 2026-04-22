@@ -12,8 +12,8 @@ use eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
-use codetracer_trace_writer::trace_writer::TraceWriter;
-use codetracer_trace_writer::{create_trace_writer, TraceEventsFileFormat};
+use codetracer_trace_writer_nim::trace_writer::TraceWriter;
+use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 
 // ---------------------------------------------------------------------------
 // Trace entry types
@@ -252,6 +252,7 @@ pub fn write_starknet_trace(
     let events_filename = match format {
         TraceEventsFileFormat::Json => "trace.json",
         TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 => "trace.bin",
+        TraceEventsFileFormat::Ctfs => "trace.ctfs",
     };
     let events_path = out_dir.join(events_filename);
     let metadata_path = out_dir.join("trace_metadata.json");
