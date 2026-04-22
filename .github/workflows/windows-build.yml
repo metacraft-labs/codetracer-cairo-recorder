@@ -19,13 +19,16 @@ jobs:
         shell: bash
         run: |
           # Download the corelib from the Cairo release matching our dependency version.
-          # Use $RUNNER_TEMP (a Windows-native path) so Rust's std::path can find it.
           CAIRO_VERSION="2.17.0-rc.4"
+          DEST="${GITHUB_WORKSPACE}/cairo-corelib"
+          mkdir -p "$DEST"
           curl -L "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.zip" \
-            -o "$RUNNER_TEMP/cairo.zip"
-          cd "$RUNNER_TEMP" && unzip -q cairo.zip "cairo-${CAIRO_VERSION}/corelib/*"
-          # Convert to Windows path for Rust (RUNNER_TEMP is already a Windows path)
-          echo "CAIRO_CORELIB_DIR=${RUNNER_TEMP}\\cairo-${CAIRO_VERSION}\\corelib\\src" >> "$GITHUB_ENV"
+            -o /tmp/cairo.zip
+          cd /tmp && unzip -q -o cairo.zip "cairo-${CAIRO_VERSION}/corelib/*"
+          cp -r "/tmp/cairo-${CAIRO_VERSION}/corelib" "$DEST/"
+          # Verify corelib exists
+          ls "$DEST/corelib/src/" | head -3
+          echo "CAIRO_CORELIB_DIR=${DEST}/corelib/src" >> "$GITHUB_ENV"
       - name: Check
         run: cargo check
       - name: Test
