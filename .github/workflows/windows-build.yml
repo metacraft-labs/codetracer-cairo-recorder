@@ -16,19 +16,17 @@ jobs:
         shell: pwsh
         run: choco install capnproto -y
       - name: Download Cairo corelib
-        shell: bash
+        shell: pwsh
         run: |
-          # Download the corelib from the Cairo release matching our dependency version.
-          CAIRO_VERSION="2.17.0-rc.4"
-          DEST="${GITHUB_WORKSPACE}/cairo-corelib"
-          mkdir -p "$DEST"
-          curl -L "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.zip" \
-            -o /tmp/cairo.zip
-          cd /tmp && unzip -q -o cairo.zip "cairo-${CAIRO_VERSION}/corelib/*"
-          cp -r "/tmp/cairo-${CAIRO_VERSION}/corelib" "$DEST/"
-          # Verify corelib exists
-          ls "$DEST/corelib/src/" | head -3
-          echo "CAIRO_CORELIB_DIR=${DEST}/corelib/src" >> "$GITHUB_ENV"
+          $CAIRO_VERSION = "2.17.0-rc.4"
+          $dest = "$env:GITHUB_WORKSPACE\cairo-corelib"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/starkware-libs/cairo/archive/refs/tags/v$CAIRO_VERSION.zip" `
+            -OutFile "$env:TEMP\cairo.zip"
+          Expand-Archive -Path "$env:TEMP\cairo.zip" -DestinationPath "$env:TEMP\cairo-extract" -Force
+          Copy-Item -Recurse -Force "$env:TEMP\cairo-extract\cairo-$CAIRO_VERSION\corelib" "$dest\"
+          Get-ChildItem "$dest\corelib\src" | Select-Object -First 3
+          echo "CAIRO_CORELIB_DIR=$dest\corelib\src" >> $env:GITHUB_ENV
       - name: Check
         run: cargo check
       - name: Test
