@@ -183,6 +183,7 @@ impl CairoTracer {
         TraceWriter::finish_writing_trace_metadata(&mut *tracer.writer)
             .map_err(|e| eyre!("{e}"))?;
         TraceWriter::finish_writing_trace_paths(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
+        tracer.writer.close().map_err(|e| eyre!("{e}"))?;
 
         Ok(())
     }
