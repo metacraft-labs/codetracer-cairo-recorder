@@ -9,8 +9,14 @@
 //! ```text
 //! codetracer-cairo-recorder record <cairo-file> \
 //!     --out-dir <output-dir> \
-//!     [--format binary|json]
+//!     [--format ctfs|binary|json]
 //! ```
+//!
+//! The default `--format ctfs` produces the canonical CodeTracer
+//! multi-stream `.ct` container that the Nim `ct_reader_*` FFI and the
+//! db-backend's `CTFSTraceReader` consume directly.  `binary` writes the
+//! legacy CBOR+Zstd format.  `json` is human-readable and useful for
+//! debugging.
 
 use std::path::PathBuf;
 
@@ -60,10 +66,28 @@ enum Commands {
     Version,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+/// The on-disk shape of the produced trace.
+///
+/// Mirrors the canonical `OutputFormat` enum used by the EVM (1.39),
+/// Solana (1.44), Move (1.46) and Cardano (1.48) recorder audits.
+#[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
+    /// Canonical CodeTracer multi-stream container (recommended).
+    Ctfs,
+    /// Legacy CBOR + Zstd binary format.
     Binary,
+    /// Human-readable JSON (slower; useful for debugging).
     Json,
+}
+
+impl From<OutputFormat> for TraceEventsFileFormat {
+    fn from(f: OutputFormat) -> Self {
+        match f {
+            OutputFormat::Ctfs => TraceEventsFileFormat::Ctfs,
+            OutputFormat::Binary => TraceEventsFileFormat::Binary,
+            OutputFormat::Json => TraceEventsFileFormat::Json,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -78,7 +102,7 @@ struct RecordArgs {
     out_dir: PathBuf,
 
     /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Ctfs)]
     format: OutputFormat,
 }
 
@@ -92,7 +116,7 @@ struct TraceStarknetArgs {
     out_dir: PathBuf,
 
     /// Output format for the trace data.
-    #[arg(short = 'f', long, default_value = "binary")]
+    #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Ctfs)]
     format: OutputFormat,
 }
 
@@ -141,10 +165,7 @@ fn trace_starknet(args: TraceStarknetArgs) -> Result<()> {
 
     eprintln!("Trace file: {}", trace_path.display());
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     let out_dir = &args.out_dir;
     std::fs::create_dir_all(out_dir)
@@ -203,10 +224,7 @@ fn record(args: RecordArgs) -> Result<()> {
 
     eprintln!("Source file: {}", source_path.display());
 
-    let format = match args.format {
-        OutputFormat::Binary => TraceEventsFileFormat::Binary,
-        OutputFormat::Json => TraceEventsFileFormat::Json,
-    };
+    let format: TraceEventsFileFormat = args.format.into();
 
     // 2. Create the output directory
     let out_dir = &args.out_dir;
