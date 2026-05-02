@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 use eyre::{eyre, Context, Result};
@@ -116,6 +116,21 @@ impl CairoTracer {
         eprintln!("Execution completed");
 
         // -- 4. Extract return value --------------------------------------------------
+        // The Cairo VM distinguishes Success / Panic results.  Both surface
+        // an ordered list of felt252 values; Panic additionally needs to
+        // raise a structured event so the failure is visible in the
+        // CodeTracer event log (audit (c) per IsoNim section 5.6 — same
+        // pattern as Move (1.46) ExecutionError and Cardano (1.48) UPLC
+        // eval errors).
+        let panic_message: Option<String> = match &result.value {
+            RunResultValue::Panic(values) => {
+                let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                Some(format!("Cairo program panicked with {} value(s): [{}]",
+                    values.len(),
+                    parts.join(", ")))
+            }
+            RunResultValue::Success(_) => None,
+        };
         let return_values: Vec<i64> = match &result.value {
             RunResultValue::Success(values) => {
                 eprintln!("Program succeeded with {} return values", values.len());
@@ -177,6 +192,20 @@ impl CairoTracer {
 
         // -- 8. Emit trace events from source analysis --------------------------------
         tracer.emit_source_trace(source_path, &source_map, &sierra_program, &return_values)?;
+
+        // -- 8b. Surface panic results through register_special_event ----------------
+        // Closing audit (c): Cairo panics used to be stderr-only, lost from
+        // the trace event log.  Routing them through register_special_event
+        // mirrors the canonical pattern (Move 1.46, Cardano 1.48) and lets
+        // the frontend surface them in the structured event-log pane.
+        if let Some(message) = panic_message {
+            TraceWriter::register_special_event(
+                &mut *tracer.writer,
+                EventLogKind::Error,
+                "CairoPanic",
+                &message,
+            );
+        }
 
         // -- 9. Finish writing --------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;

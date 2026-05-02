@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use codetracer_trace_types::{Line, TypeKind, ValueRecord, NONE_VALUE};
+use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
 use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 
@@ -90,6 +90,20 @@ pub fn parse_snforge_trace(path: &Path) -> Result<Vec<TraceEntry>> {
         .with_context(|| format!("failed to parse snforge trace JSON: {}", path.display()))?;
 
     Ok(trace.entries)
+}
+
+/// Wrap a string snippet as a `ValueRecord::String` typed as the
+/// already-registered Cairo `felt252` string type.
+///
+/// All snforge trace fields are JSON strings (felt252 hex / decimal
+/// representations).  Wrapping them in `ValueRecord::String` keeps the
+/// downstream `arg(name, value)` / `register_variable_*` plumbing
+/// uniform with the Cairo source-trace path.
+fn str_value(text: &str, str_type_id: codetracer_trace_types::TypeId) -> ValueRecord {
+    ValueRecord::String {
+        text: text.to_string(),
+        type_id: str_type_id,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,29 +282,105 @@ pub fn write_starknet_trace(
 
     let str_type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::String, "felt252");
 
-    let converted = convert_snforge_trace(entries);
-
-    for event in &converted {
-        match event {
-            TraceEvent::Step { line } => {
-                TraceWriter::register_step(&mut *writer, trace_path, Line(*line as i64));
-            }
-            TraceEvent::Call { name } => {
+    // Walk entries directly so we can:
+    //   - stage call args via TraceWriter::arg(name, value) before
+    //     register_call (audit (b) — same pattern as Move 1.46 / Cardano 1.48).
+    //   - route `Event` entries through register_special_event with
+    //     EventLogKind::EvmEvent (audit (c) — same pattern as EVM 1.39).
+    //
+    // The legacy convert_snforge_trace() path is preserved for unit-test
+    // backward compatibility but is no longer the source of truth for
+    // writing; it remains exposed for data-conversion fixtures.
+    let mut line: u32 = 1;
+    for entry in entries {
+        match entry {
+            TraceEntry::ContractCall {
+                caller,
+                callee,
+                selector,
+                calldata,
+            } => {
+                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                let name = format!("{}::{}", callee, selector);
                 let fn_id =
-                    TraceWriter::ensure_function_id(&mut *writer, name, trace_path, Line(1));
+                    TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
+
+                // Stage caller / callee / selector / each calldata felt as
+                // canonical call args.  These were previously emitted as
+                // scoped Variables, which surfaces them in the locals pane
+                // but not on CallRecord.args (audit (b)).
+                let _ = TraceWriter::arg(&mut *writer, "caller", str_value(caller, str_type_id));
+                let _ = TraceWriter::arg(&mut *writer, "callee", str_value(callee, str_type_id));
+                let _ = TraceWriter::arg(&mut *writer, "selector", str_value(selector, str_type_id));
+                for (idx, item) in calldata.iter().enumerate() {
+                    let _ = TraceWriter::arg(
+                        &mut *writer,
+                        &format!("calldata{idx}"),
+                        str_value(item, str_type_id),
+                    );
+                }
+
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
-            }
-            TraceEvent::Return => {
                 TraceWriter::register_return(&mut *writer, NONE_VALUE);
             }
-            TraceEvent::Variable { name, value } => {
-                let val = ValueRecord::String {
-                    text: value.clone(),
-                    type_id: str_type_id,
-                };
-                TraceWriter::register_variable_with_full_value(&mut *writer, name, val);
+            TraceEntry::StorageRead { contract, key, value } => {
+                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                let name = format!("{}::storage_read", contract);
+                let fn_id =
+                    TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
+                let _ = TraceWriter::arg(&mut *writer, "key", str_value(key, str_type_id));
+                let _ = TraceWriter::arg(&mut *writer, "value", str_value(value, str_type_id));
+                TraceWriter::register_call(&mut *writer, fn_id, vec![]);
+                TraceWriter::register_return(&mut *writer, NONE_VALUE);
+            }
+            TraceEntry::StorageWrite {
+                contract,
+                key,
+                old_value,
+                new_value,
+            } => {
+                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                let name = format!("{}::storage_write", contract);
+                let fn_id =
+                    TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
+                let _ = TraceWriter::arg(&mut *writer, "key", str_value(key, str_type_id));
+                let _ = TraceWriter::arg(
+                    &mut *writer,
+                    "old_value",
+                    str_value(old_value, str_type_id),
+                );
+                let _ = TraceWriter::arg(
+                    &mut *writer,
+                    "new_value",
+                    str_value(new_value, str_type_id),
+                );
+                TraceWriter::register_call(&mut *writer, fn_id, vec![]);
+                TraceWriter::register_return(&mut *writer, NONE_VALUE);
+            }
+            TraceEntry::Event { contract, keys, data } => {
+                // Starknet contract-emitted log events are structured
+                // (keys, data) records — analogous to EVM LOG opcodes.
+                // Route them through register_special_event with the
+                // canonical EventLogKind::EvmEvent kind so the frontend
+                // event-log pane surfaces them as structured log records
+                // rather than synthetic stdout text.  This mirrors the
+                // EVM (1.39) routing for LOG-style events.
+                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                let metadata = format!("StarknetEvent:{contract}");
+                let content = format!(
+                    "keys=[{}] data=[{}]",
+                    keys.join(", "),
+                    data.join(", ")
+                );
+                TraceWriter::register_special_event(
+                    &mut *writer,
+                    EventLogKind::EvmEvent,
+                    &metadata,
+                    &content,
+                );
             }
         }
+        line += 1;
     }
 
     TraceWriter::finish_writing_trace_events(&mut *writer).map_err(|e| eyre!("{e}"))?;
