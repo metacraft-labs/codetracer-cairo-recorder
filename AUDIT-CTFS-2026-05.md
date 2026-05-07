@@ -408,3 +408,69 @@ the following findings from this audit are likely to apply directly
 * (a), (d), (e), (g), C-FFI: likely OK by structure (Rust-native,
   single-threaded VM execution).  Verify quickly during the next
   audit.
+
+## Convention compliance follow-up — 2026-05-08
+
+The 2026-05-02 audit landed a `--format ctfs|binary|json` `clap::ValueEnum`
+defaulting to `Ctfs`, mirroring the EVM (1.39) / Solana (1.44) /
+Move (1.46) / Cardano (1.48) audits.  Subsequent to that audit,
+`Recorder-CLI-Conventions.md` §4 in `codetracer-specs` was tightened
+to require **CTFS-only** output: recorders no longer accept a
+`--format` flag and `ct print` (shipped with `codetracer-trace-format-nim`)
+is the canonical conversion tool for human-readable output.
+`Repo-Requirements.md` §2.2 / §2.3 reflect this contract.
+
+This entry records the convention compliance follow-up applied to the
+Cairo recorder on 2026-05-08:
+
+* The `--format` / `-f` CLI flag was removed from `record` and
+  `trace-starknet` subcommands.  The `OutputFormat` enum and the
+  `impl From<OutputFormat> for TraceEventsFileFormat` block were
+  deleted.  Clap rejects `--format <anything>` with an
+  "unexpected argument" error.
+* The JSON output path was removed.  The recorder's writer is
+  hard-pinned to `TraceEventsFileFormat::Ctfs` at every call site:
+  `tracer.rs::CairoTracer::trace_program`, `recorder.rs::record`, and
+  `starknet.rs::write_starknet_trace` no longer take a `format`
+  parameter.
+* The `events_filename` match in `tracer.rs` and `starknet.rs` (which
+  used to dispatch on `Json` / `Binary` / `BinaryV0` / `Ctfs`) was
+  collapsed to the single CTFS arm.
+* `CODETRACER_CAIRO_RECORDER_OUT_DIR` was added as a fallback for
+  `--out-dir`.  Lookup order is CLI flag → env var → `./ct-traces/`.
+* `CODETRACER_CAIRO_RECORDER_DISABLED=1` (or `true`) skips the trace
+  emission entirely; the Cairo recorder doesn't run a separate target
+  subprocess so "disabled" simply means "don't write any artefacts".
+* The CTFS-only contract is now in force across the codebase: the
+  binary's `--help` output mentions `ct print` as the conversion tool;
+  the README documents only CTFS, the env-var contract, and the
+  `ct print` workflow.
+* Tests in `tests/test_tracer.rs` that previously asserted on
+  `--format json`-produced JSON files (and were already `#[ignore]`'d
+  because they referenced the legacy 3-file output shape removed in
+  M33) were deleted.  They were redundant with the CTFS coverage in
+  `tests/test_ctfs_audit.rs` and could not be revived without
+  rewriting against a CTFS reader; the surviving JSON-content
+  assertion now records via the recorder's native CTFS path and
+  pipes the produced `.ct` container through `ct-print --json`.
+  New env-var integration tests
+  (`test_env_out_dir_used_when_flag_omitted`,
+  `test_env_disabled_skips_recording`, `test_format_flag_rejected_by_clap`)
+  cover the convention §5 surface.
+* `tests/test_ctfs_audit.rs` was updated to assert the new contract
+  (no `--format` in any subcommand's `--help`; `ct print` mentioned
+  in `--help`) and the audit (b)/(c)/(e)/(f) regression tests now
+  call `recorder::record(...)` and `write_starknet_trace(...)`
+  without a format argument.
+* `tests/verify-cli-convention-no-silent-skip.sh` was added as a
+  shell-level guard that runs the binary's `--help`, asserts
+  `--format` and `CODETRACER_FORMAT` are absent, asserts the standard
+  flags (`--out-dir`, `--version`) are present, and asserts the
+  `CODETRACER_CAIRO_RECORDER_OUT_DIR` env var is referenced in source.
+  A `Justfile` was added at repo root to wire it into `just lint` /
+  `just test`.
+
+References:
+
+* [`codetracer-specs/Recorder-CLI-Conventions.md`](../codetracer-specs/Recorder-CLI-Conventions.md) §4 (CTFS-only) and §5 (env vars).
+* [`codetracer-specs/Repo-Requirements.md`](../codetracer-specs/Repo-Requirements.md) §2.2 (CLI compliance) and §2.3 (trace format compatibility).

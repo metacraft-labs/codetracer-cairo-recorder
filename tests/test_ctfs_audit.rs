@@ -5,25 +5,29 @@
 //! established by the EVM (1.39), Solana (1.44), Move (1.46), and
 //! Cardano (1.48) recorder audits.
 //!
-//! Each test corresponds to one bullet from the section 5.6 audit
-//! checklist:
+//! The 2026-05-08 convention compliance follow-up tightened §4 of
+//! `Recorder-CLI-Conventions.md`: recorders are now CTFS-only and
+//! must not expose a `--format` flag.  Tests that previously
+//! validated the `--format ctfs` value enum have been rewritten to
+//! validate the new contract:
+//!
+//!  - The CLI binary must NOT advertise `--format` in any subcommand's
+//!    `--help` output.
+//!  - `--help` must mention `ct print` so users know how to convert
+//!    the produced CTFS bundle to JSON / text.
+//!  - The recorder still produces a canonical CTFS `.ct` container;
+//!    that's now the only on-disk shape.
+//!
+//! Each remaining test corresponds to one bullet from the section 5.6
+//! audit checklist:
 //!
 //!  - (b) Call args via `arg()` — `test_starknet_contract_call_stages_args`.
 //!  - (c) Starknet log events via `register_special_event` —
 //!    `test_starknet_event_emits_special_event`.
-//!  - (f) Canonical CTFS schema match — `test_ctfs_format_advertised_in_help`
-//!    and `test_ctfs_writer_produces_ct_container`.
-//!
-//! Note: these tests verify behaviour at the recorder API surface and
-//! at the CLI surface.  Decoding the binary `.ct` container requires a
-//! CTFS reader which is not in this crate's dev-dependencies; the
-//! per-event assertions therefore assert on observable artefacts (file
-//! existence, magic bytes, container size, CLI help text) rather than
-//! decoding the records.
+//!  - (f) Canonical CTFS schema match — `test_no_format_flag_in_help`,
+//!    `test_help_mentions_ct_print`, and `test_ctfs_writer_produces_ct_container`.
 
 use std::path::Path;
-
-use codetracer_trace_writer_nim::TraceEventsFileFormat;
 
 /// Canonical CTFS multi-stream container magic — see
 /// `codetracer-trace-format-spec/`.
@@ -31,15 +35,15 @@ const CTFS_MAGIC: [u8; 5] = [0xC0, 0xDE, 0x72, 0xAC, 0xE2];
 
 /// Helper: build a tempdir, run the recorder against `flow_test.cairo`,
 /// and return the path to the produced trace container.
-fn record_flow_test(format: TraceEventsFileFormat) -> (tempfile::TempDir, std::path::PathBuf) {
+fn record_flow_test() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("test-programs/cairo/flow_test.cairo");
+    let source_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("test-programs/cairo/flow_test.cairo");
 
-    codetracer_cairo_recorder::recorder::record(&source_path, &out_dir, format)
+    codetracer_cairo_recorder::recorder::record(&source_path, &out_dir)
         .expect("recorder::record should succeed");
 
     (tmp_dir, out_dir)
@@ -62,10 +66,11 @@ fn ct_files_in(out_dir: &Path) -> Vec<std::path::PathBuf> {
 /// `CTFSTraceReader` consume directly).  Pre-fix, the CLI's
 /// `OutputFormat` enum did not even expose `Ctfs` — only `Binary` /
 /// `Json` — so there was no way to request the canonical container
-/// from the CLI.
+/// from the CLI.  Post-2026-05-08 the recorder is CTFS-only and the
+/// `--format` flag has been removed altogether.
 #[test]
 fn test_ctfs_writer_produces_ct_container() {
-    let (_tmp, out_dir) = record_flow_test(TraceEventsFileFormat::Ctfs);
+    let (_tmp, out_dir) = record_flow_test();
 
     let ct_files = ct_files_in(&out_dir);
     assert!(
@@ -83,59 +88,64 @@ fn test_ctfs_writer_produces_ct_container() {
     );
 }
 
-/// The CLI binary must accept `ctfs` as a `--format` value AND default
-/// to it.  This catches accidental regressions in the CLI surface (e.g.
-/// someone reverting the `OutputFormat` enum back to the pre-fix
-/// `Binary` / `Json` only shape).
+/// The CLI binary must not expose a `--format` flag at any level.
+/// This catches accidental regressions to the pre-2026-05-08 shape
+/// (where `--format ctfs|binary|json` lived on `record` and
+/// `trace-starknet`).
 ///
-/// Same shape as the Cardano (1.48), Move (1.46) and Solana (1.44)
-/// audit smoke tests.
+/// Convention: `Recorder-CLI-Conventions.md` §4 — recorders are
+/// CTFS-only.  Same shape as the BEAM recorder M9 follow-up.
 #[test]
-fn test_ctfs_format_advertised_in_help() {
+fn test_no_format_flag_in_help() {
     use std::process::Command;
 
     let bin = env!("CARGO_BIN_EXE_codetracer-cairo-recorder");
-    let output = Command::new(bin)
-        .args(["record", "--help"])
-        .output()
-        .expect("failed to run codetracer-cairo-recorder record --help");
 
-    assert!(output.status.success(), "--help should exit 0");
+    for subcmd in [None, Some("record"), Some("trace-starknet")] {
+        let mut cmd = Command::new(bin);
+        if let Some(s) = subcmd {
+            cmd.arg(s);
+        }
+        cmd.arg("--help");
 
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        help.contains("ctfs"),
-        "`record --help` should advertise `ctfs` as a --format value; got:\n{help}"
-    );
-    assert!(
-        help.contains("[default: ctfs]"),
-        "`record --help` should default --format to `ctfs`; got:\n{help}"
-    );
+        let output = cmd.output().expect("failed to run --help");
+        assert!(
+            output.status.success(),
+            "--help (subcmd={:?}) should exit 0",
+            subcmd
+        );
+
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !help.contains("--format"),
+            "--help (subcmd={:?}) must not advertise --format; got:\n{help}",
+            subcmd
+        );
+        assert!(
+            !help.contains("CODETRACER_FORMAT"),
+            "--help (subcmd={:?}) must not advertise CODETRACER_FORMAT; got:\n{help}",
+            subcmd
+        );
+    }
 }
 
-/// The same default-Ctfs guarantee must hold for the `trace-starknet`
-/// subcommand.  This protects against partial reverts that fix only one
-/// subcommand's default.
+/// `--help` must mention `ct print` so users know where to go for
+/// human-readable conversion of the recorded CTFS bundle.
 #[test]
-fn test_ctfs_format_default_for_trace_starknet() {
+fn test_help_mentions_ct_print() {
     use std::process::Command;
 
     let bin = env!("CARGO_BIN_EXE_codetracer-cairo-recorder");
     let output = Command::new(bin)
-        .args(["trace-starknet", "--help"])
+        .arg("--help")
         .output()
-        .expect("failed to run codetracer-cairo-recorder trace-starknet --help");
-
+        .expect("failed to run --help");
     assert!(output.status.success(), "--help should exit 0");
 
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(
-        help.contains("ctfs"),
-        "`trace-starknet --help` should advertise `ctfs`; got:\n{help}"
-    );
-    assert!(
-        help.contains("[default: ctfs]"),
-        "`trace-starknet --help` should default --format to `ctfs`; got:\n{help}"
+        help.contains("ct print"),
+        "--help must mention `ct print` as the conversion tool; got:\n{help}"
     );
 }
 
@@ -152,7 +162,7 @@ fn test_ctfs_format_default_for_trace_starknet() {
 /// header).  Same shape as the Cardano 1.48 audit's regression test.
 #[test]
 fn test_steps_emitted_for_let_bindings() {
-    let (_tmp, out_dir) = record_flow_test(TraceEventsFileFormat::Ctfs);
+    let (_tmp, out_dir) = record_flow_test();
 
     let ct_size: u64 = ct_files_in(&out_dir)
         .iter()
@@ -183,9 +193,7 @@ fn test_steps_emitted_for_let_bindings() {
 ///
 /// We can't decode the `.ct` container directly, but we can assert that
 /// `write_starknet_trace` runs to completion against the mock-trace
-/// fixture and produces a populated `.ct` artefact.  The pre-fix code
-/// already did this (it just emitted Variables instead of args), so
-/// this is a structural smoke test guarding the Ok-result invariant.
+/// fixture and produces a populated `.ct` artefact.
 #[test]
 fn test_starknet_contract_call_stages_args() {
     use codetracer_cairo_recorder::starknet::{parse_snforge_trace, write_starknet_trace};
@@ -194,11 +202,11 @@ fn test_starknet_contract_call_stages_args() {
     let out_dir = tmp_dir.path().join("starknet-traces");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    let trace_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("test-programs/starknet/mock_trace.json");
+    let trace_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("test-programs/starknet/mock_trace.json");
     let entries = parse_snforge_trace(&trace_path).expect("parse mock trace");
 
-    write_starknet_trace(&trace_path, &entries, &out_dir, TraceEventsFileFormat::Ctfs)
+    write_starknet_trace(&trace_path, &entries, &out_dir)
         .expect("write_starknet_trace should succeed");
 
     let ct_files = ct_files_in(&out_dir);
@@ -230,18 +238,9 @@ fn test_starknet_contract_call_stages_args() {
 /// Post-fix, `write_starknet_trace` *also* routes each Event entry
 /// through `register_special_event(EventLogKind::EvmEvent, ...)` so the
 /// frontend's structured event-log surface receives them.
-///
-/// The synthetic Call/Variable emission is NOT removed — keeping it
-/// preserves backward compatibility with downstream consumers and the
-/// existing pure-conversion unit tests.  This test verifies the
-/// post-fix invariant at the recorder API: a trace containing a
-/// Starknet event runs through to completion and produces a populated
-/// `.ct` container.
 #[test]
 fn test_starknet_event_emits_special_event() {
-    use codetracer_cairo_recorder::starknet::{
-        write_starknet_trace, TraceEntry,
-    };
+    use codetracer_cairo_recorder::starknet::{write_starknet_trace, TraceEntry};
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("starknet-traces");
@@ -259,7 +258,7 @@ fn test_starknet_event_emits_special_event() {
     let trace_path = tmp_dir.path().join("synthetic.json");
     std::fs::write(&trace_path, "[]").unwrap();
 
-    write_starknet_trace(&trace_path, &entries, &out_dir, TraceEventsFileFormat::Ctfs)
+    write_starknet_trace(&trace_path, &entries, &out_dir)
         .expect("write_starknet_trace should succeed even for event-only traces");
 
     let ct_files = ct_files_in(&out_dir);
