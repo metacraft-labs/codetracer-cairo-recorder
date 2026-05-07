@@ -32,18 +32,24 @@ pub struct CairoTracer {
 }
 
 impl CairoTracer {
-    /// Trace a Cairo program and write CodeTracer output files.
+    /// Trace a Cairo program and write a CodeTracer CTFS bundle.
     ///
     /// 1. Compiles the Cairo source to Sierra.
     /// 2. Runs the program using SierraCasmRunner.
     /// 3. Emits trace events based on execution results.
-    /// 4. Writes trace.json/trace.bin (depending on format), trace_metadata.json, trace_paths.json.
-    pub fn trace_program(
-        source_path: &Path,
-        source_code: &str,
-        out_dir: &Path,
-        format: TraceEventsFileFormat,
-    ) -> Result<()> {
+    /// 4. Writes the canonical CTFS multi-stream `.ct` container plus the
+    ///    `trace_metadata.json` / `trace_paths.json` sidecars to `out_dir`.
+    ///
+    /// The output format is fixed to CTFS — see
+    /// `Recorder-CLI-Conventions.md` §4 in `codetracer-specs`.  Use
+    /// `ct print` (from `codetracer-trace-format-nim`) to convert the
+    /// produced bundle to JSON or other text forms.
+    pub fn trace_program(source_path: &Path, source_code: &str, out_dir: &Path) -> Result<()> {
+        // CTFS-only.  Pre-2026-05-08 the recorder accepted a format
+        // parameter (`TraceEventsFileFormat::{Json,Binary,Ctfs}`) and the
+        // CLI exposed a `--format` flag.  The convention now mandates
+        // CTFS exclusively.
+        let format = TraceEventsFileFormat::Ctfs;
         // -- 1. Compile Cairo source to Sierra ----------------------------------------
         let compiler_config = CompilerConfig {
             replace_ids: true,
@@ -125,9 +131,11 @@ impl CairoTracer {
         let panic_message: Option<String> = match &result.value {
             RunResultValue::Panic(values) => {
                 let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-                Some(format!("Cairo program panicked with {} value(s): [{}]",
+                Some(format!(
+                    "Cairo program panicked with {} value(s): [{}]",
                     values.len(),
-                    parts.join(", ")))
+                    parts.join(", ")
+                ))
             }
             RunResultValue::Success(_) => None,
         };
@@ -166,11 +174,9 @@ impl CairoTracer {
         std::fs::create_dir_all(out_dir)
             .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-        let events_filename = match format {
-            TraceEventsFileFormat::Json => "trace.json",
-            TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 => "trace.bin",
-            TraceEventsFileFormat::Ctfs => "trace.ctfs",
-        };
+        // CTFS multi-stream container.  Other formats are not reachable —
+        // see the CTFS-only contract above.
+        let events_filename = "trace.ctfs";
         let events_path = out_dir.join(events_filename);
         let metadata_path = out_dir.join("trace_metadata.json");
         let paths_path = out_dir.join("trace_paths.json");

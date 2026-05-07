@@ -249,25 +249,30 @@ pub fn convert_snforge_trace(entries: &[TraceEntry]) -> Vec<TraceEvent> {
 
 /// Write converted snforge trace entries to CodeTracer output files.
 ///
-/// Creates `trace.json`/`trace.bin` (depending on format), `trace_metadata.json`, and `trace_paths.json`
-/// in `out_dir`, mirroring the output of the `record` subcommand.
+/// Creates the canonical CTFS multi-stream `.ct` container plus
+/// `trace_metadata.json` / `trace_paths.json` sidecars in `out_dir`,
+/// mirroring the output of the `record` subcommand.
+///
+/// The recorder is CTFS-only — see `Recorder-CLI-Conventions.md` §4 in
+/// `codetracer-specs`.  Use `ct print` from `codetracer-trace-format-nim`
+/// to convert the produced bundle to JSON or other text forms.
 pub fn write_starknet_trace(
     trace_path: &Path,
     entries: &[TraceEntry],
     out_dir: &Path,
-    format: TraceEventsFileFormat,
 ) -> Result<()> {
     let program_str = trace_path.to_string_lossy();
+    // CTFS-only.  Pre-2026-05-08 this function took a format parameter
+    // and the CLI exposed `--format ctfs|binary|json`.  The convention
+    // now mandates CTFS exclusively for all recorders.
+    let format = TraceEventsFileFormat::Ctfs;
     let mut writer = create_trace_writer(&program_str, &[], format);
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
-    let events_filename = match format {
-        TraceEventsFileFormat::Json => "trace.json",
-        TraceEventsFileFormat::Binary | TraceEventsFileFormat::BinaryV0 => "trace.bin",
-        TraceEventsFileFormat::Ctfs => "trace.ctfs",
-    };
+    // CTFS multi-stream container.
+    let events_filename = "trace.ctfs";
     let events_path = out_dir.join(events_filename);
     let metadata_path = out_dir.join("trace_metadata.json");
     let paths_path = out_dir.join("trace_paths.json");
@@ -311,7 +316,8 @@ pub fn write_starknet_trace(
                 // but not on CallRecord.args (audit (b)).
                 let _ = TraceWriter::arg(&mut *writer, "caller", str_value(caller, str_type_id));
                 let _ = TraceWriter::arg(&mut *writer, "callee", str_value(callee, str_type_id));
-                let _ = TraceWriter::arg(&mut *writer, "selector", str_value(selector, str_type_id));
+                let _ =
+                    TraceWriter::arg(&mut *writer, "selector", str_value(selector, str_type_id));
                 for (idx, item) in calldata.iter().enumerate() {
                     let _ = TraceWriter::arg(
                         &mut *writer,
@@ -323,7 +329,11 @@ pub fn write_starknet_trace(
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
                 TraceWriter::register_return(&mut *writer, NONE_VALUE);
             }
-            TraceEntry::StorageRead { contract, key, value } => {
+            TraceEntry::StorageRead {
+                contract,
+                key,
+                value,
+            } => {
                 TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
                 let name = format!("{}::storage_read", contract);
                 let fn_id =
@@ -344,20 +354,18 @@ pub fn write_starknet_trace(
                 let fn_id =
                     TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
                 let _ = TraceWriter::arg(&mut *writer, "key", str_value(key, str_type_id));
-                let _ = TraceWriter::arg(
-                    &mut *writer,
-                    "old_value",
-                    str_value(old_value, str_type_id),
-                );
-                let _ = TraceWriter::arg(
-                    &mut *writer,
-                    "new_value",
-                    str_value(new_value, str_type_id),
-                );
+                let _ =
+                    TraceWriter::arg(&mut *writer, "old_value", str_value(old_value, str_type_id));
+                let _ =
+                    TraceWriter::arg(&mut *writer, "new_value", str_value(new_value, str_type_id));
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
                 TraceWriter::register_return(&mut *writer, NONE_VALUE);
             }
-            TraceEntry::Event { contract, keys, data } => {
+            TraceEntry::Event {
+                contract,
+                keys,
+                data,
+            } => {
                 // Starknet contract-emitted log events are structured
                 // (keys, data) records — analogous to EVM LOG opcodes.
                 // Route them through register_special_event with the
@@ -367,11 +375,7 @@ pub fn write_starknet_trace(
                 // EVM (1.39) routing for LOG-style events.
                 TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
                 let metadata = format!("StarknetEvent:{contract}");
-                let content = format!(
-                    "keys=[{}] data=[{}]",
-                    keys.join(", "),
-                    data.join(", ")
-                );
+                let content = format!("keys=[{}] data=[{}]", keys.join(", "), data.join(", "));
                 TraceWriter::register_special_event(
                     &mut *writer,
                     EventLogKind::EvmEvent,
