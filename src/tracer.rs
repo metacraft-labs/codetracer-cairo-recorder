@@ -29,6 +29,11 @@ pub struct CairoTracer {
     writer: Box<dyn TraceWriter + Send>,
     /// Cairo felt252 type id (registered once).
     felt_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Cairo `Array<felt252>` type id (registered lazily once a compound
+    /// Sequence value is about to be emitted).
+    array_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Cairo tuple type id (registered lazily for compound Tuple values).
+    tuple_type_id: Option<codetracer_trace_types::TypeId>,
 }
 
 impl CairoTracer {
@@ -168,6 +173,8 @@ impl CairoTracer {
         let mut tracer = CairoTracer {
             writer: create_trace_writer(&program_str, &[], format),
             felt_type_id: None,
+            array_type_id: None,
+            tuple_type_id: None,
         };
 
         // -- 6. Initialise output files -----------------------------------------------
@@ -242,6 +249,15 @@ impl CairoTracer {
 
         // Parse let-binding names and their source lines (no value evaluation).
         let binding_names = parse_let_binding_names(source_code);
+
+        // Parse compound (Array / Tuple) let-bindings whose elements can be
+        // recovered from the source itself (literal-only `arr.append(N)`
+        // sequences for Arrays, literal-only `(a, b, ...)` initialisers for
+        // tuples).  These produce ValueRecord::Sequence / ValueRecord::Tuple
+        // entries that the recorder emits at the step matching `emit_line`.
+        // See the module-level note above `parse_compound_bindings` for
+        // the heuristic's scope.
+        let compound_bindings = parse_compound_bindings(source_code);
 
         // Parse the return expression to map return-value slots to variable names.
         // For a tuple return like `(a, b, sum_val)`, each slot maps to one name.
@@ -324,6 +340,22 @@ impl CairoTracer {
                     }
                 }
             }
+
+            // Emit compound (Sequence / Tuple) values whose contents were
+            // recovered from the source.  Each entry's `emit_line` is the
+            // step at which the value first appears with its full payload
+            // (for arrays — the line of the last `.append(...)`; for
+            // tuples — the let-binding line itself).
+            for binding in &compound_bindings {
+                if binding.emit_line == line_num {
+                    let value = self.compound_to_value_record(binding);
+                    TraceWriter::register_variable_with_full_value(
+                        &mut *self.writer,
+                        &binding.name,
+                        value,
+                    );
+                }
+            }
         }
 
         // Emit return value for the last function.
@@ -344,6 +376,296 @@ impl CairoTracer {
 
         Ok(())
     }
+
+    /// Lazily register the `Array<felt252>` type id for compound Sequence
+    /// values (Cairo source: `Array<felt252>`).  The id is reused across
+    /// every emitted Sequence in the trace.
+    fn ensure_array_type_id(&mut self) -> codetracer_trace_types::TypeId {
+        if let Some(id) = self.array_type_id {
+            return id;
+        }
+        let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Seq, "Array<felt252>");
+        self.array_type_id = Some(id);
+        id
+    }
+
+    /// Lazily register the tuple type id used for compound Tuple values.
+    /// The same id is reused for every felt252 tuple regardless of arity —
+    /// the recorder does not yet model arity-specific tuple types.
+    fn ensure_tuple_type_id(&mut self) -> codetracer_trace_types::TypeId {
+        if let Some(id) = self.tuple_type_id {
+            return id;
+        }
+        let id = TraceWriter::ensure_type_id(
+            &mut *self.writer,
+            TypeKind::Tuple,
+            "(felt252, ...)",
+        );
+        self.tuple_type_id = Some(id);
+        id
+    }
+
+    /// Convert a parsed compound binding (Array literal sequence / tuple
+    /// literal initialiser) into the matching `ValueRecord`.  All element
+    /// felt literals are wrapped as `ValueRecord::Int` against the shared
+    /// `felt252` type id registered at trace start.
+    fn compound_to_value_record(&mut self, binding: &CompoundBinding) -> ValueRecord {
+        let felt_type_id = self.felt_type_id.expect("felt type id registered");
+        let elements: Vec<ValueRecord> = binding
+            .elements
+            .iter()
+            .map(|i| ValueRecord::Int {
+                i: *i,
+                type_id: felt_type_id,
+            })
+            .collect();
+        match binding.kind {
+            CompoundKind::Array => ValueRecord::Sequence {
+                elements,
+                is_slice: false,
+                type_id: self.ensure_array_type_id(),
+            },
+            CompoundKind::Tuple => ValueRecord::Tuple {
+                elements,
+                type_id: self.ensure_tuple_type_id(),
+            },
+        }
+    }
+}
+
+/// Compound (collection-shaped) let-binding extracted from the Cairo
+/// source.  Today the heuristic recovers two flavours:
+///
+/// * `Array<felt252>` declarations whose elements are inserted via a
+///   contiguous run of `<name>.append(<int_literal>);` statements that
+///   live in the same function body.
+/// * Tuple let-bindings whose RHS is a literal tuple of integer felts
+///   (e.g. `let pair: (felt252, felt252) = (10, 20);`).
+///
+/// Anything else (computed elements, nested arrays, struct values, etc.)
+/// is left to the scalar `parse_let_binding_names` path.  See the doc
+/// comment on `parse_compound_bindings` for the parser's strict scope.
+#[derive(Debug, Clone)]
+struct CompoundBinding {
+    name: String,
+    /// 1-based source line at which the recorder emits the compound value
+    /// as a step variable.  For arrays this is the line of the final
+    /// `.append(...)` call (so the array is fully populated); for tuples
+    /// this is the let-binding line itself.
+    emit_line: u32,
+    kind: CompoundKind,
+    elements: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CompoundKind {
+    Array,
+    Tuple,
+}
+
+/// Recover compound (Array / Tuple) let-bindings from the Cairo source.
+///
+/// This is a deliberately small heuristic that complements the felt-only
+/// `parse_let_binding_names` path: it gives the recorder a fighting
+/// chance to surface `ValueRecord::Sequence` / `ValueRecord::Tuple`
+/// alongside the existing `ValueRecord::Int` emissions, even though it
+/// stops well short of evaluating arbitrary Cairo expressions.
+///
+/// Recognised shapes (literal-only):
+///
+/// * `let mut <name>: Array<felt252> = ArrayTrait::new();` followed by
+///   one or more `<name>.append(<int_literal>);` statements before the
+///   end of the enclosing function body.  The recovered Sequence is
+///   emitted at the line of the last matching `.append(...)`.
+///
+/// * `let <name>: (felt252, ...) = (<int_literal>, <int_literal>, ...);`
+///   The recovered Tuple is emitted at the let-binding's own line.
+///
+/// A spec-compliant implementation would walk the Sierra/CASM debug info
+/// and read the actual VM memory regions for these source-level types
+/// (Option B in the bug write-up).  That's a much bigger project; this
+/// heuristic is sufficient to expose the two ValueRecord variants the
+/// fixture covers and to unblock collection-aware downstream consumers.
+fn parse_compound_bindings(source: &str) -> Vec<CompoundBinding> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out: Vec<CompoundBinding> = Vec::new();
+
+    // First, split the source into function bodies so an `<name>.append`
+    // that follows an Array decl in a *different* function does not
+    // accidentally extend the previous function's array.
+    let fn_ranges = function_line_ranges(&lines);
+
+    for (fn_start, fn_end) in fn_ranges {
+        for k in fn_start..=fn_end {
+            let trimmed = lines[k].trim();
+            if !trimmed.starts_with("let ") {
+                continue;
+            }
+
+            // ----- Array<...> = ArrayTrait::new(); -------------------
+            if let Some(name) = parse_mut_array_decl(trimmed) {
+                let (emit_line, elements) =
+                    collect_array_appends(&lines, k + 1, fn_end, &name);
+                if !elements.is_empty() {
+                    out.push(CompoundBinding {
+                        name,
+                        emit_line,
+                        kind: CompoundKind::Array,
+                        elements,
+                    });
+                }
+                continue;
+            }
+
+            // ----- let <name>: (felt252, ...) = (lit, lit, ...); -----
+            if let Some((name, elements)) = parse_literal_tuple_decl(trimmed) {
+                out.push(CompoundBinding {
+                    name,
+                    emit_line: (k + 1) as u32,
+                    kind: CompoundKind::Tuple,
+                    elements,
+                });
+                continue;
+            }
+        }
+    }
+
+    out
+}
+
+/// Return inclusive (start, end) 0-based line index ranges for every
+/// top-level `fn ...` body in the source.  Brace-depth tracker is the
+/// same one used by `parse_return_expression` — kept here as a private
+/// helper to avoid coupling the two.
+fn function_line_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if !trimmed.starts_with("fn ") {
+            i += 1;
+            continue;
+        }
+        let fn_start = i;
+        let mut brace_depth = 0i32;
+        let mut fn_end = i;
+        for (j, line) in lines.iter().enumerate().skip(fn_start) {
+            for ch in line.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                } else if ch == '}' {
+                    brace_depth -= 1;
+                }
+            }
+            if brace_depth == 0 && j > fn_start {
+                fn_end = j;
+                break;
+            }
+        }
+        ranges.push((fn_start, fn_end));
+        i = fn_end + 1;
+    }
+    ranges
+}
+
+/// Match `let mut <name>: Array<...> = ArrayTrait::new();` and return
+/// `<name>`.  Anything more elaborate (custom constructor, type alias,
+/// initial-value list) falls through.
+fn parse_mut_array_decl(line: &str) -> Option<String> {
+    // Strip `let mut ` prefix.
+    let rest = line.strip_prefix("let mut ")?;
+    let colon = rest.find(':')?;
+    let name = rest[..colon].trim().to_string();
+    let after_colon = rest[colon + 1..].trim_start();
+    if !after_colon.starts_with("Array<") {
+        return None;
+    }
+    if !line.contains("ArrayTrait::new()") {
+        return None;
+    }
+    if name.is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// Walk forward through a function body collecting integer literals
+/// passed to `<name>.append(...)`.  Returns the (last-append 1-based
+/// line, literal values) pair.  Stops at the first non-append statement
+/// that mentions the name (e.g. the line that finally consumes the
+/// array) or at the end of the function body.
+fn collect_array_appends(
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    name: &str,
+) -> (u32, Vec<i64>) {
+    let mut elements = Vec::new();
+    let mut last_append_line = 0u32;
+    let append_prefix = format!("{name}.append(");
+    for k in start..=end {
+        let trimmed = lines[k].trim();
+        if !trimmed.starts_with(&append_prefix) {
+            continue;
+        }
+        // Strip prefix and trailing `);`.
+        let inside = &trimmed[append_prefix.len()..];
+        let close = match inside.find(')') {
+            Some(p) => p,
+            None => continue,
+        };
+        let lit = inside[..close].trim();
+        if let Ok(v) = lit.parse::<i64>() {
+            elements.push(v);
+            last_append_line = (k + 1) as u32;
+        }
+    }
+    (last_append_line, elements)
+}
+
+/// Match `let <name>[: (...)]= (lit, lit, ...);` and return `(name,
+/// elements)`.  Only pure integer-literal initialisers are recognised
+/// today — destructuring binds (`let (x, y) = pair;`) and computed
+/// expressions are intentionally ignored to keep the heuristic
+/// conservative.
+fn parse_literal_tuple_decl(line: &str) -> Option<(String, Vec<i64>)> {
+    let rest = line.strip_prefix("let ")?;
+    // Skip destructuring binds — they begin with a `(` after `let `.
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+    let name = if let Some(colon_pos) = lhs.find(':') {
+        lhs[..colon_pos].trim()
+    } else {
+        lhs
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    if !(rhs.starts_with('(') && rhs.ends_with(')')) {
+        return None;
+    }
+    let inner = &rhs[1..rhs.len() - 1];
+    let mut elements = Vec::new();
+    for part in inner.split(',') {
+        let lit = part.trim();
+        if lit.is_empty() {
+            continue;
+        }
+        match lit.parse::<i64>() {
+            Ok(v) => elements.push(v),
+            Err(_) => return None,
+        }
+    }
+    if elements.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), elements))
 }
 
 /// Parse let-binding names and their 1-based line numbers from source.

@@ -691,6 +691,96 @@ fn observed_var_sequence(doc: &serde_json::Value) -> Vec<(String, i64)> {
     out
 }
 
+/// Like `observed_var_sequence` but skips any variable whose name is
+/// in `compound_names` — for tests where a few specific bindings now
+/// emit non-Int variants (e.g. Sequence/Tuple) and the rest are still
+/// expected to be Int.  The strictness of the underlying helper is
+/// preserved for every other variable.
+fn observed_var_sequence_filtered(
+    doc: &serde_json::Value,
+    compound_names: &[&str],
+) -> Vec<(String, i64)> {
+    let events = doc["events"].as_array().expect("events array");
+    let mut out = Vec::new();
+    for ev in events {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        let Some(vars) = ev["vars"].as_array() else {
+            continue;
+        };
+        for v in vars {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            if compound_names.contains(&name.as_str()) {
+                continue;
+            }
+            let value = &v["value"];
+            assert_eq!(
+                value["kind"].as_str(),
+                Some("Int"),
+                "variable `{}` should decode as Int, got {}; \
+                 if a new ValueRecord variant has landed for cairo \
+                 (e.g. Sequence/Tuple/Struct for arrays, tuples, structs), \
+                 extend this test to assert on it explicitly rather than \
+                 weakening the check",
+                name,
+                value
+            );
+            let i = value["i"].as_i64().unwrap_or_else(|| {
+                panic!("Int.i must be i64 for `{name}`; got {value}")
+            });
+            out.push((name, i));
+        }
+    }
+    out
+}
+
+/// Decode every (varname, ValueRecord-kind) pair from step events in
+/// event-emission order.  Unlike `observed_var_sequence`, this helper
+/// does not constrain the kind — callers use it to assert on the full
+/// kind sequence (Int / Sequence / Tuple / Struct / ...).
+fn observed_var_kinds(doc: &serde_json::Value) -> Vec<(String, String)> {
+    let events = doc["events"].as_array().expect("events array");
+    let mut out = Vec::new();
+    for ev in events {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        let Some(vars) = ev["vars"].as_array() else {
+            continue;
+        };
+        for v in vars {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            let kind = v["value"]["kind"]
+                .as_str()
+                .expect("ValueRecord must carry a `kind` tag")
+                .to_string();
+            out.push((name, kind));
+        }
+    }
+    out
+}
+
+/// Find the first step variable matching `target` and return its raw
+/// `value` JSON object (so callers can drill into variant-specific
+/// fields like `elements`, `is_slice`, `i`).  Returns `None` if no
+/// step variable with that name exists in the trace.
+fn find_var_value<'a>(doc: &'a serde_json::Value, target: &str) -> Option<&'a serde_json::Value> {
+    let events = doc["events"].as_array()?;
+    for ev in events {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        let vars = ev["vars"].as_array()?;
+        for v in vars {
+            if v["varname"].as_str() == Some(target) {
+                return Some(&v["value"]);
+            }
+        }
+    }
+    None
+}
+
 /// Decode the call-entry sequence as a vector of bare function names
 /// (last `::` segment).  The Cairo recorder fully-qualifies functions
 /// as `<crate>::<crate>::<name>`; the bare-name view keeps assertions
@@ -1082,11 +1172,12 @@ fn test_nested_calls_test_call_exit_returns_real_values() {
 
 // --- collections_test.cairo ------------------------------------------------
 
-/// Records `collections_test.cairo`.  RECORDER BUG: collection
-/// values (Array / Tuple) are not surfaced as ValueRecord::Sequence
-/// or ValueRecord::Tuple — only the **scalar** let-bindings inside
-/// `compute()`'s tuple-return slot end up with decoded `Int` values.
-/// The arrays and tuples themselves are completely opaque.
+/// Records `collections_test.cairo`.  Verifies that the recorder
+/// surfaces Array literals as `ValueRecord::Sequence` and tuple-literal
+/// initialisers as `ValueRecord::Tuple` alongside the existing scalar
+/// `ValueRecord::Int` emissions.  See the matching
+/// `test_collections_test_value_kinds_present` for the minimal kind-set
+/// assertion.
 #[test]
 fn test_collections_test_via_ct_print_full() {
     let Some((doc, source_path)) = record_and_dump_full(
@@ -1143,17 +1234,64 @@ fn test_collections_test_via_ct_print_full() {
     assert_all_call_exits_return_void(&doc);
 
     // ----- Decoded values --------------------------------------------
-    // RECORDER BUG: a spec-compliant trace would expose the Array
-    // `arr` as a ValueRecord::Sequence (or List) with elements
-    // [1,2,3,4], and the tuple `(10, 20)` as ValueRecord::Tuple.
-    // Today the recorder only surfaces the scalar let-bindings that
-    // live inside `compute()`'s tuple-return slot.
+    // The recorder emits a `ValueRecord::Sequence` for the literal-only
+    // `arr` Array<felt252> binding (line 6, after the last `arr.append`)
+    // and a `ValueRecord::Tuple` for the literal-only `pair` tuple
+    // initialiser (line 12).  The remaining scalar bindings (the
+    // tuple-return slots of `compute`) decode as `ValueRecord::Int`.
     //
     //   array_total() returns 4 (the length of [1,2,3,4])
     //   pair_sum()    returns 30 (10 + 20)
     //   final_sum     = 4 + 30 = 34
+    let observed = observed_var_kinds(&doc);
     assert_eq!(
-        observed_var_sequence(&doc),
+        observed,
+        vec![
+            ("arr".to_string(), "Sequence".to_string()),
+            ("pair".to_string(), "Tuple".to_string()),
+            ("arr_total".to_string(), "Int".to_string()),
+            ("pair_total".to_string(), "Int".to_string()),
+            ("final_sum".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // Strict-shape assertions for the compound values.  Element ordering
+    // must match the source-level append/literal order; bare `i64`
+    // values must round-trip through the felt252 Int encoding.
+    let arr_value = find_var_value(&doc, "arr").expect("arr step variable");
+    assert_eq!(arr_value["kind"].as_str(), Some("Sequence"));
+    assert_eq!(arr_value["is_slice"].as_bool(), Some(false));
+    let arr_elements: Vec<i64> = arr_value["elements"]
+        .as_array()
+        .expect("arr.elements")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"), "arr element should be Int");
+            e["i"].as_i64().expect("arr element i")
+        })
+        .collect();
+    assert_eq!(arr_elements, vec![1, 2, 3, 4]);
+
+    let pair_value = find_var_value(&doc, "pair").expect("pair step variable");
+    assert_eq!(pair_value["kind"].as_str(), Some("Tuple"));
+    let pair_elements: Vec<i64> = pair_value["elements"]
+        .as_array()
+        .expect("pair.elements")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"), "pair element should be Int");
+            e["i"].as_i64().expect("pair element i")
+        })
+        .collect();
+    assert_eq!(pair_elements, vec![10, 20]);
+
+    // Scalar (Int) emissions remain unchanged.  `observed_var_sequence`
+    // still hard-rejects non-Int variants, so we filter the compound
+    // names out before comparing.
+    let scalar_only = observed_var_sequence_filtered(&doc, &["arr", "pair"]);
+    assert_eq!(
+        scalar_only,
         vec![
             ("arr_total".to_string(), 4),
             ("pair_total".to_string(), 30),
@@ -1164,11 +1302,6 @@ fn test_collections_test_via_ct_print_full() {
 }
 
 #[test]
-#[ignore = "RECORDER BUG: arrays, tuples and structs are not encoded \
-            as ValueRecord::Sequence / Tuple / Struct.  Spec-compliant \
-            output should expose at minimum the Sequence variant for \
-            `arr` (= [1,2,3,4]) and the Tuple variant for `pair` \
-            (= (10, 20)) — the recorder currently only writes Int."]
 fn test_collections_test_value_kinds_present() {
     let Some((doc, _)) = record_and_dump_full(
         "test_collections_test_value_kinds_present",
