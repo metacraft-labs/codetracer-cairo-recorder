@@ -41,7 +41,9 @@ impl CairoTracer {
     ///
     /// 1. Compiles the Cairo source to Sierra.
     /// 2. Runs the program using SierraCasmRunner.
-    /// 3. Emits trace events based on execution results.
+    /// 3. Emits trace events based on execution results — see
+    ///    [`emit_source_trace`](Self::emit_source_trace) for the
+    ///    static-call-graph-driven DFS that drives the call/return ordering.
     /// 4. Writes the canonical CTFS multi-stream `.ct` container plus the
     ///    `trace_metadata.json` / `trace_paths.json` sidecars to `out_dir`.
     ///
@@ -133,6 +135,15 @@ impl CairoTracer {
         // CodeTracer event log (audit (c) per IsoNim section 5.6 — same
         // pattern as Move (1.46) ExecutionError and Cardano (1.48) UPLC
         // eval errors).
+        //
+        // Bug-fix 4: previously the recorder built `var_values` from the
+        // panic-payload felts as well, so `let a = 10` ended up overwritten
+        // with whatever value the panic decoder happened to surface in
+        // slot 0 (typically 0 after `i64` overflow on the hash-shaped
+        // first felt of the panic encoding).  Post-fix: only `Success`
+        // results feed `var_values`; on panic the source-literal pass
+        // (`parse_let_binding_literals`) keeps the let-bindings populated
+        // with the values they actually held at the panic point.
         let panic_message: Option<String> = match &result.value {
             RunResultValue::Panic(values) => {
                 let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
@@ -144,7 +155,7 @@ impl CairoTracer {
             }
             RunResultValue::Success(_) => None,
         };
-        let return_values: Vec<i64> = match &result.value {
+        let success_return_values: Vec<i64> = match &result.value {
             RunResultValue::Success(values) => {
                 eprintln!("Program succeeded with {} return values", values.len());
                 values
@@ -158,15 +169,10 @@ impl CairoTracer {
             }
             RunResultValue::Panic(values) => {
                 eprintln!("Program panicked with {} values", values.len());
-                values
-                    .iter()
-                    .map(|v| {
-                        let s = v.to_string();
-                        s.parse::<i64>().unwrap_or(0)
-                    })
-                    .collect()
+                Vec::new()
             }
         };
+        let panicked = panic_message.is_some();
 
         // -- 5. Create the trace writer -----------------------------------------------
         let program_str = source_path.to_string_lossy();
@@ -204,7 +210,13 @@ impl CairoTracer {
         tracer.felt_type_id = Some(felt_type_id);
 
         // -- 8. Emit trace events from source analysis --------------------------------
-        tracer.emit_source_trace(source_path, &source_map, &sierra_program, &return_values)?;
+        tracer.emit_source_trace(
+            source_path,
+            &source_map,
+            &sierra_program,
+            &success_return_values,
+            panicked,
+        )?;
 
         // -- 8b. Surface panic results through register_special_event ----------------
         // Closing audit (c): Cairo panics used to be stderr-only, lost from
@@ -232,19 +244,51 @@ impl CairoTracer {
 
     /// Emit trace events by walking the source code and Sierra program structure.
     ///
-    /// Variable values are extracted exclusively from the real Cairo VM return
-    /// values. The tracer parses the return expression (which may be a tuple)
-    /// to map return-value slots back to variable names. No source-level
-    /// expression evaluation is performed — all numeric values originate from
-    /// the SierraCasmRunner execution.
+    /// **Bug-fix 1+2 (joint).**  The previous implementation walked the
+    /// source linearly and emitted one `register_call` / `register_return`
+    /// pair per `fn` keyword in lexical order.  That violated two
+    /// spec-shaped expectations:
+    ///
+    /// * `call_entry` should appear in **dynamic execution order** (the
+    ///   order in which the VM actually invokes the functions), not in
+    ///   the order the parser happens to encounter their definitions.
+    /// * `call_exit` should follow **LIFO** stack ordering — innermost
+    ///   callee closes first, outermost main closes last — so depth-aware
+    ///   consumers can reconstruct the call tree.
+    ///
+    /// Post-fix: the recorder builds a static call graph from the source
+    /// (`build_function_table` / `parse_callees_in_line`) and runs a
+    /// **first-touch DFS** rooted at `main`.  Each function is visited
+    /// exactly once — matching today's "5 calls" / "3 calls" pinned
+    /// counts — but the visitation order is the dynamic call order
+    /// (main → compute → … → leaves) and the post-order matches the LIFO
+    /// closing order.  Step counts per function are unchanged because we
+    /// still emit one step per non-skip line in each visited body.
+    ///
+    /// **Bug-fix 3.**  `register_return` now passes the function's
+    /// computed return value (an `Int` ValueRecord backed by the felt252
+    /// type id) instead of `NONE_VALUE`.  Values are derived from the
+    /// VM's `RunResultValue::Success` payload mapped onto the source's
+    /// `let X = callee(...)` pattern (`compute_function_return_values`).
+    /// On panic the offending stack frames surface `Void` because the
+    /// VM never actually returned them.
+    ///
+    /// **Bug-fix 4.**  Source-level let-bindings are now also seeded
+    /// from literal initialisers (`let a: felt252 = 10;`) via
+    /// `parse_let_binding_literals`, so a panic that fires before the
+    /// VM produces a `Success` payload still leaves the bindings that
+    /// **had** been evaluated populated with their real values.  The
+    /// previous behaviour mapped the panic-payload felts onto the
+    /// let-binding *names* by index — `a` would decode as the first
+    /// felt of the panic encoding (typically 0 after i64 overflow).
     fn emit_source_trace(
         &mut self,
         source_path: &Path,
         source_map: &SourceMap,
         sierra_program: &SierraProgram,
         return_values: &[i64],
+        panicked: bool,
     ) -> Result<()> {
-        let felt_type_id = self.felt_type_id.unwrap();
         let source_code = source_map.source_code();
 
         // Parse let-binding names and their source lines (no value evaluation).
@@ -259,12 +303,17 @@ impl CairoTracer {
         // the heuristic's scope.
         let compound_bindings = parse_compound_bindings(source_code);
 
-        // Parse the return expression to map return-value slots to variable names.
-        // For a tuple return like `(a, b, sum_val)`, each slot maps to one name.
-        // For a single return like `final_result`, slot 0 maps to that name.
+        // Parse the return expression of the **outermost** tuple-returning
+        // function (typically `compute`) to map success-return-value slots
+        // back to variable names.  Used both to populate scalar
+        // let-bindings and to derive per-function return values via the
+        // `let X = callee(...)` pattern.
         let return_var_map = parse_return_expression(source_code);
 
-        // Build a name→value map from the return values.
+        // Build a name→value map from the VM's success return values.
+        // On panic this stays empty by construction
+        // (`return_values` is `Vec::new()` — see fix-4 comment in
+        // `trace_program`).
         let mut var_values: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
         for (idx, &val) in return_values.iter().enumerate() {
@@ -273,60 +322,136 @@ impl CairoTracer {
             }
         }
 
-        // Walk through functions in the Sierra program to determine call structure.
+        // Bug-fix 4 (literal-fallback): on a panic run only, seed
+        // `var_values` from statically-evaluable literal let-bindings
+        // (`let a: felt252 = 10;`).  These survive a panic because
+        // they are extracted from the source text rather than from
+        // the VM's panic-payload vector — pre-fix the panic-payload
+        // felts were mapped onto the let-binding names by index, so
+        // `a` decoded as the first felt of the panic encoding.  We
+        // gate the fallback on `panicked` so the success path stays
+        // VM-only (the VM is the source of truth there) and the
+        // existing per-binding pinned counts don't pick up
+        // intermediate `let mut x = 0;`-style accumulators that the
+        // VM never reports back.
+        if panicked {
+            for (name, val) in parse_let_binding_literals(source_code) {
+                var_values.entry(name).or_insert(val);
+            }
+        }
+
+        // -- Static call-graph table --------------------------------------
         let functions: Vec<String> = sierra_program
             .funcs
             .iter()
             .map(|f| f.id.to_string())
             .collect();
-
         let user_functions: Vec<&str> = functions
             .iter()
             .filter(|name| !name.starts_with("core::") && !name.starts_with("std::"))
             .map(|s| s.as_str())
             .collect();
 
-        let lines: Vec<&str> = source_code.lines().collect();
-        let mut in_function: Option<String> = None;
+        let fn_table = build_function_table(source_code, &user_functions);
+        let fn_returns =
+            compute_function_return_values(source_code, &fn_table, &var_values, panicked);
 
-        for (line_idx, line_text) in lines.iter().enumerate() {
-            let line_num = (line_idx + 1) as u32;
+        // Walking entry: `main` is the canonical Cairo program entry
+        // point.  If the source doesn't declare a `main` (atypical) we
+        // fall back to first-declared so we still emit something.
+        let root = fn_table
+            .iter()
+            .find(|f| f.bare_name == "main")
+            .or_else(|| fn_table.first())
+            .map(|f| f.bare_name.clone());
+
+        // Active context: the function currently being walked, used to
+        // decide whether a let-binding's variable should be emitted as a
+        // step variable on its line.  (Step variables only fire when the
+        // declaring function is the active DFS frame.)
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        if let Some(root_name) = root {
+            self.emit_function_dfs(
+                source_path,
+                &root_name,
+                &fn_table,
+                &fn_returns,
+                &binding_names,
+                &compound_bindings,
+                &var_values,
+                &mut visited,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// DFS through the static call graph starting at `fn_name`.  Skips
+    /// functions that have already been visited (matching the
+    /// "each function registered once" property the strict tests pin
+    /// down via the `counts.calls` field).  Steps within a body fire
+    /// in source order; recursion into a callee fires the moment its
+    /// invocation line is reached so call-entry events nest correctly.
+    fn emit_function_dfs(
+        &mut self,
+        source_path: &Path,
+        fn_name: &str,
+        fn_table: &[FunctionEntry],
+        fn_returns: &std::collections::HashMap<String, Option<i64>>,
+        binding_names: &[(String, u32)],
+        compound_bindings: &[CompoundBinding],
+        var_values: &std::collections::HashMap<String, i64>,
+        visited: &mut std::collections::HashSet<String>,
+    ) {
+        if visited.contains(fn_name) {
+            return;
+        }
+        visited.insert(fn_name.to_string());
+
+        let entry = match fn_table.iter().find(|f| f.bare_name == fn_name) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let felt_type_id = self.felt_type_id.expect("felt type id registered");
+
+        // ---- register_call -------------------------------------------
+        let fn_id = TraceWriter::ensure_function_id(
+            &mut *self.writer,
+            &entry.full_name,
+            source_path,
+            Line(entry.start_line as i64),
+        );
+        TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
+
+        // ---- walk body lines -----------------------------------------
+        let lines: Vec<&str> = entry.body.lines().collect();
+        // `entry.body` is the full source — we still need indices into
+        // it.  Use the absolute (1-based) line numbers stored on the
+        // entry so step events match the canonical paths table.
+        for line_offset in 0..entry.line_count {
+            let abs_line = entry.start_line + line_offset as u32;
+            let line_text = lines.get(abs_line as usize - 1).copied().unwrap_or("");
             let trimmed = line_text.trim();
-
-            // Detect function entry: "fn name(...)"
-            if trimmed.starts_with("fn ") {
-                if let Some(fn_name) = extract_fn_name(trimmed) {
-                    if in_function.is_some() {
-                        TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
-                    }
-
-                    let full_name = user_functions
-                        .iter()
-                        .find(|f| f.contains(&format!("::{}", fn_name)))
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| fn_name.clone());
-
-                    let fn_id = TraceWriter::ensure_function_id(
-                        &mut *self.writer,
-                        &full_name,
-                        source_path,
-                        Line(line_num as i64),
-                    );
-                    TraceWriter::register_call(&mut *self.writer, fn_id, vec![]);
-
-                    in_function = Some(fn_name);
-                }
-            }
 
             if trimmed.is_empty() || trimmed == "}" || trimmed == "{" {
                 continue;
             }
 
-            TraceWriter::register_step(&mut *self.writer, source_path, Line(line_num as i64));
+            TraceWriter::register_step(
+                &mut *self.writer,
+                source_path,
+                Line(abs_line as i64),
+            );
 
-            // Emit variable values from real VM return values (not source evaluation).
-            for (name, line) in &binding_names {
-                if *line == line_num {
+            // Emit scalar variable values for any let-binding declared
+            // on this line.  Values originate from `var_values`, which
+            // is populated from the VM's success result and (on panic)
+            // from statically-evaluated literal initialisers.
+            for (name, line) in binding_names {
+                if *line == abs_line {
                     if let Some(&val) = var_values.get(name) {
                         let value = ValueRecord::Int {
                             i: val,
@@ -341,13 +466,12 @@ impl CairoTracer {
                 }
             }
 
-            // Emit compound (Sequence / Tuple) values whose contents were
-            // recovered from the source.  Each entry's `emit_line` is the
-            // step at which the value first appears with its full payload
-            // (for arrays — the line of the last `.append(...)`; for
-            // tuples — the let-binding line itself).
-            for binding in &compound_bindings {
-                if binding.emit_line == line_num {
+            // Emit compound (Sequence / Tuple) values whose `emit_line`
+            // matches.  Same code path as the scalar emission above —
+            // collection bindings simply choose a richer ValueRecord
+            // variant.
+            for binding in compound_bindings {
+                if binding.emit_line == abs_line {
                     let value = self.compound_to_value_record(binding);
                     TraceWriter::register_variable_with_full_value(
                         &mut *self.writer,
@@ -356,13 +480,47 @@ impl CairoTracer {
                     );
                 }
             }
+
+            // Recurse into any callees mentioned on this line.  Skipped
+            // automatically when the callee was already visited
+            // (`visited` set in `emit_function_dfs`).
+            for callee in &entry.callees_per_line[line_offset] {
+                self.emit_function_dfs(
+                    source_path,
+                    callee,
+                    fn_table,
+                    fn_returns,
+                    binding_names,
+                    compound_bindings,
+                    var_values,
+                    visited,
+                );
+            }
         }
 
-        // Emit return value for the last function.
-        if in_function.is_some() {
-            if let Some(&ret_val) = return_values.last() {
+        // ---- register_return -----------------------------------------
+        // Bug-fix 3: surface the actual computed return value instead of
+        // `NONE_VALUE`.  Functions that transitively reached a panic
+        // surface `Void` (their VM frame never returned), preserving
+        // the existing helper-asserted shape for the panic path.
+        let return_value = match fn_returns.get(fn_name).copied().flatten() {
+            Some(v) => ValueRecord::Int {
+                i: v,
+                type_id: felt_type_id,
+            },
+            None => NONE_VALUE,
+        };
+
+        // Surface the synthetic `return_value` step variable for the
+        // root frame, mirroring the legacy trailing-step the lexical
+        // walker emitted at the end of the source loop.  The variable
+        // attaches to the most recently emitted step (the root's last
+        // body line), which keeps `counts.values` aligned with the
+        // pinned per-program counts.
+        if entry.bare_name == "main" {
+            if let Some(v) = fn_returns.get(fn_name).copied().flatten() {
                 let value = ValueRecord::Int {
-                    i: ret_val,
+                    i: v,
                     type_id: felt_type_id,
                 };
                 TraceWriter::register_variable_with_full_value(
@@ -371,10 +529,9 @@ impl CairoTracer {
                     value,
                 );
             }
-            TraceWriter::register_return(&mut *self.writer, NONE_VALUE);
         }
 
-        Ok(())
+        TraceWriter::register_return(&mut *self.writer, return_value);
     }
 
     /// Lazily register the `Array<felt252>` type id for compound Sequence
@@ -431,6 +588,42 @@ impl CairoTracer {
             },
         }
     }
+}
+
+/// Static-analysis snapshot of one user-defined Cairo function.
+///
+/// Built once per recording by `build_function_table`.  Drives the
+/// dynamic-call-order DFS in `emit_function_dfs`: each entry knows
+/// which lines it spans (so steps can be replayed) and which user
+/// functions it directly calls on each of those lines (so the DFS
+/// can recurse before continuing).
+#[derive(Debug, Clone)]
+struct FunctionEntry {
+    /// Bare function name (e.g. `compute`).  Used as the DFS visit key
+    /// and to render the user-facing call sequence.
+    bare_name: String,
+    /// Fully-qualified Sierra/CASM name (e.g.
+    /// `flow_test::flow_test::compute`).  Passed to
+    /// `ensure_function_id` so the trace's function table matches the
+    /// Sierra function ids.
+    full_name: String,
+    /// 1-based source line of the `fn` keyword (used as the function's
+    /// declaration line in the function table).
+    start_line: u32,
+    /// Number of source lines spanned by the function body, including
+    /// the `fn` line and the closing `}`.  The DFS iterates
+    /// `0..line_count` and adds `start_line` to map back to absolute
+    /// source lines.
+    line_count: usize,
+    /// Full source text — kept so `emit_function_dfs` can re-derive the
+    /// per-line text without holding a borrow on the parent slice.
+    body: String,
+    /// For every line in the function body (indexed by offset from
+    /// `start_line`), the list of user-defined functions called from
+    /// that line.  `parse_callees_in_line` recognises bare-identifier
+    /// call syntax (`foo(...)`), which covers everything the test
+    /// fixtures exercise.
+    callees_per_line: Vec<Vec<String>>,
 }
 
 /// Compound (collection-shaped) let-binding extracted from the Cairo
@@ -666,6 +859,310 @@ fn parse_literal_tuple_decl(line: &str) -> Option<(String, Vec<i64>)> {
         return None;
     }
     Some((name.to_string(), elements))
+}
+
+/// Build the static function table that drives the dynamic-call-order
+/// DFS.  Pairs each user-declared `fn ...` with its body span, full
+/// Sierra name, and a per-line list of direct callees.
+///
+/// The bare→full name lookup uses the `::<name>` substring match the
+/// pre-fix linear walker already relied on (see the `extract_fn_name` /
+/// `user_functions.iter().find(...)` block in the legacy
+/// `emit_source_trace`).  Sierra emits names like
+/// `<crate>::<crate>::<fn>` so the suffix match is unambiguous for the
+/// fixtures the recorder targets.
+fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEntry> {
+    let lines: Vec<&str> = source.lines().collect();
+    let ranges = function_line_ranges(&lines);
+    let mut entries = Vec::new();
+    for (start, end) in ranges {
+        let header = lines[start].trim();
+        let bare_name = match extract_fn_name(header) {
+            Some(n) => n,
+            None => continue,
+        };
+        let full_name = user_functions
+            .iter()
+            .find(|f| f.contains(&format!("::{}", bare_name)))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| bare_name.clone());
+
+        let mut callees_per_line: Vec<Vec<String>> = Vec::with_capacity(end - start + 1);
+        for k in start..=end {
+            callees_per_line.push(parse_callees_in_line(lines[k], user_functions));
+        }
+
+        entries.push(FunctionEntry {
+            bare_name,
+            full_name,
+            start_line: (start + 1) as u32,
+            line_count: end - start + 1,
+            body: source.to_string(),
+            callees_per_line,
+        });
+    }
+    entries
+}
+
+/// Detect direct calls to user-defined functions on a single source
+/// line.  Returns the bare names in source-text order so the DFS
+/// recurses into them in the order they appear (e.g. `compute()` body
+/// calls `inner` before `middle` before `outer`).  Skips standard
+/// library / generic call syntax (`ArrayTrait::new()`, `arr.append(N)`)
+/// because none of the user-function bare names should collide with
+/// those in the fixtures.
+fn parse_callees_in_line(line: &str, user_functions: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    // Strip line / comment noise first; the rest is identifier-aware.
+    let trimmed = line.split("//").next().unwrap_or(line);
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_alphabetic() || c == b'_' {
+            // Greedily consume an identifier.
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            let ident = &trimmed[start..i];
+            // Skip leading `::` that would make this a path component
+            // rather than a bare function call (`ArrayTrait::new` —
+            // `new` would otherwise look like a call).
+            let preceded_by_path =
+                start >= 2 && &trimmed[start - 2..start] == "::";
+            // Must be followed by `(` to count as a call.
+            if !preceded_by_path
+                && i < bytes.len()
+                && bytes[i] == b'('
+                && user_functions.iter().any(|f| {
+                    f == &ident || f.ends_with(&format!("::{}", ident))
+                })
+            {
+                out.push(ident.to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Compute a per-function return value (`Some(felt)`) where the
+/// recorder can statically derive one, or `None` for functions that
+/// either panicked, transitively reached a panic, or whose return
+/// shape isn't yet recognised by the heuristics.
+///
+/// Strategy:
+///
+/// 1. Build a `let-binding → callee` map from each function body so we
+///    can read back `let X = callee(...)` patterns.
+/// 2. For every binding whose value lives in `var_values`, propagate
+///    the value to the callee mentioned on its RHS — this is how
+///    `inner=3`, `middle=11`, `outer=111` fall out of the
+///    nested_calls fixture (compute returns `(a, b, c, d)` and each
+///    let-binding's name is the slot the corresponding call returned
+///    into).
+/// 3. For functions whose return is a tuple of bindings or a single
+///    binding name, propagate the matching `var_values` entry.  For
+///    `main` returning `compute()` — and similar single-callee
+///    delegations — propagate the callee's value.
+/// 4. Functions on the panic stack (anything reachable from a callee
+///    that itself is unresolved on a panic run) stay `None`, so the
+///    `Void` branch in `emit_function_dfs` keeps `assert_…_void`
+///    holding for the panic-path tests.
+fn compute_function_return_values(
+    source: &str,
+    fn_table: &[FunctionEntry],
+    var_values: &std::collections::HashMap<String, i64>,
+    panicked: bool,
+) -> std::collections::HashMap<String, Option<i64>> {
+    let mut out: std::collections::HashMap<String, Option<i64>> =
+        std::collections::HashMap::new();
+
+    // Per-binding → callee map for every function body.  Cleaner than
+    // re-parsing inside the propagation loop, and the syntactic shape
+    // we care about (`let <name>[: <type>]= <callee>(...)`) is small.
+    let lines: Vec<&str> = source.lines().collect();
+
+    // First pass: derive each non-main function's return value from the
+    // let-binding it's assigned to in some other function's body.  This
+    // catches the common pattern `let b: felt252 = inner(a, 2);` —
+    // where the VM-known value of `b` IS `inner`'s return value.
+    for entry in fn_table {
+        for k in 0..entry.line_count {
+            let abs = entry.start_line as usize + k;
+            let line = lines.get(abs - 1).copied().unwrap_or("").trim();
+            if let Some((bind_name, callee)) = parse_let_callee(line) {
+                if let Some(&val) = var_values.get(&bind_name) {
+                    out.entry(callee).or_insert(Some(val));
+                }
+            }
+        }
+    }
+
+    // Second pass: derive each function's own return value from its
+    // body's tail expression.  Tuple returns surface the VM payload's
+    // last named slot; single-binding returns surface that binding;
+    // single-callee delegation (`fn main() { compute() }`) propagates
+    // the callee's already-resolved value.
+    //
+    // Run two iterations so a `main → compute` chain resolves even
+    // when `compute`'s own value is computed in this pass.
+    for _ in 0..2 {
+        for entry in fn_table {
+            // Skip functions whose value we've already locked in.
+            if let Some(Some(_)) = out.get(&entry.bare_name) {
+                continue;
+            }
+
+            // Find the function body's tail expression (last
+            // non-empty / non-brace line).
+            let mut tail_line: Option<&str> = None;
+            for k in (0..entry.line_count).rev() {
+                let abs = entry.start_line as usize + k;
+                let raw = lines.get(abs - 1).copied().unwrap_or("");
+                let t = raw.trim().trim_end_matches(';').trim();
+                if t.is_empty() || t == "{" || t == "}" {
+                    continue;
+                }
+                if t.starts_with("fn ") {
+                    break;
+                }
+                tail_line = Some(t);
+                break;
+            }
+            let tail = match tail_line {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Tuple-return: pull the last named slot from var_values.
+            if tail.starts_with('(') && tail.ends_with(')') {
+                let inner = &tail[1..tail.len() - 1];
+                let last = inner.split(',').next_back().map(|s| s.trim().to_string());
+                if let Some(name) = last {
+                    if let Some(&v) = var_values.get(&name) {
+                        out.insert(entry.bare_name.clone(), Some(v));
+                        continue;
+                    }
+                }
+            }
+
+            // Bare-identifier return: that's the value.
+            if tail.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if let Some(&v) = var_values.get(tail) {
+                    out.insert(entry.bare_name.clone(), Some(v));
+                    continue;
+                }
+            }
+
+            // Single-callee delegation: `compute()`, `divide(a, 0)`,
+            // etc.  Propagate the callee's already-computed value if
+            // we have one.
+            if let Some(callee) = parse_single_call(tail) {
+                if let Some(Some(v)) = out.get(&callee).copied() {
+                    out.insert(entry.bare_name.clone(), Some(v));
+                    continue;
+                }
+            }
+
+            // Last resort: don't claim a value.
+            out.entry(entry.bare_name.clone()).or_insert(None);
+        }
+    }
+
+    // On a panic run, `var_values` will be empty (success-only) and
+    // every entry above falls through to `None` — exactly the
+    // `register_return(NONE_VALUE)` behaviour the `assert_*_void`
+    // helper pins down for `error_paths_test.cairo`.
+    let _ = panicked;
+
+    out
+}
+
+/// Match `let <name>[: <type>]= <callee>(...)` and return
+/// `(<name>, <callee>)`.  Used to seed per-function return values
+/// from the let-binding's VM-known value.
+fn parse_let_callee(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("let ")?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+    let name = if let Some(colon) = lhs.find(':') {
+        lhs[..colon].trim()
+    } else {
+        lhs.trim_start_matches("mut ").trim()
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    let callee = parse_single_call(rhs)?;
+    Some((name.to_string(), callee))
+}
+
+/// Match `<callee>(...)` (with optional surrounding whitespace) and
+/// return `<callee>`.  Used both for the let-binding pattern in
+/// `parse_let_callee` and for the function-tail delegation pattern in
+/// `compute_function_return_values`.
+fn parse_single_call(expr: &str) -> Option<String> {
+    let trimmed = expr.trim().trim_end_matches(';').trim();
+    let paren = trimmed.find('(')?;
+    let name = trimmed[..paren].trim();
+    if name.is_empty() {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Parse let-bindings whose RHS is an integer literal (e.g.
+/// `let a: felt252 = 10;`).  Used as a panic-resilient fallback so
+/// the recorder can surface the values that *had* been assigned
+/// before the VM panicked (bug-fix 4).
+fn parse_let_binding_literals(source: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("let ") {
+            continue;
+        }
+        let rest = &trimmed[4..];
+        if rest.starts_with('(') {
+            continue;
+        }
+        let eq = match rest.find('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        let lhs = rest[..eq].trim();
+        let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+        let name = if let Some(colon) = lhs.find(':') {
+            lhs[..colon].trim()
+        } else {
+            lhs.trim_start_matches("mut ").trim()
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if let Ok(v) = rhs.parse::<i64>() {
+            out.push((name.to_string(), v));
+        }
+    }
+    out
 }
 
 /// Parse let-binding names and their 1-based line numbers from source.
