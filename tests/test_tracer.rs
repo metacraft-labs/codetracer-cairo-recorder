@@ -370,7 +370,11 @@ fn test_recorded_trace_via_ct_print_json() {
 
     let events = doc["events"].as_array().expect("events array");
 
-    // ----- Call sequence: compute first, then main --------------------
+    // ----- Call sequence: main first, then compute (dynamic order) ----
+    // The recorder DFS-walks the static call graph from `main`, so the
+    // first call_entry event is always the program entry point and the
+    // callees follow in source-text order as the DFS recurses through
+    // their invocation sites.  See `tracer.rs::emit_function_dfs`.
     let call_sequence: Vec<&str> = events
         .iter()
         .filter(|e| e["kind"] == "call_entry")
@@ -383,13 +387,13 @@ fn test_recorded_trace_via_ct_print_json() {
         call_sequence
     );
     assert!(
-        call_sequence[0].ends_with("::compute"),
-        "expected first call to be `compute`; got {:?}",
+        call_sequence[0].ends_with("::main"),
+        "expected first call to be `main` (program entry point); got {:?}",
         call_sequence
     );
     assert!(
-        call_sequence[1].ends_with("::main"),
-        "expected second call to be `main`; got {:?}",
+        call_sequence[1].ends_with("::compute"),
+        "expected second call to be `compute` (called from main); got {:?}",
         call_sequence
     );
 
@@ -579,15 +583,17 @@ fn test_format_flag_rejected_by_clap() {
 // a hard error message asking the test author to extend the test
 // rather than weaken the assertion.
 //
-// Where the recorder's current behaviour deviates from what the
-// language semantics dictate (e.g. `call_entry` events are emitted in
-// **lexical** source order rather than dynamic execution order, each
-// callee is registered exactly once even when invoked multiple times,
-// `call_exit.return_value` is always `Void`, and collection literals
-// always decode as `Int`), the deviation is documented inline as
-// `RECORDER BUG: ...` and a parallel `#[ignore]`d sibling test
-// captures the spec-correct expectation so it surfaces the moment the
-// recorder catches up.
+// Pre-2026-05-13 the recorder deviated from spec on four counts —
+// (1) `call_entry` was emitted in lexical source order rather than
+// dynamic execution order, (2) `call_exit` events did not follow LIFO
+// ordering, (3) `call_exit.return_value` was always `Void`, and (4)
+// on a panic the source-level let-bindings were overwritten by the
+// panic-payload felts by index.  Each deviation was tracked by a
+// `#[ignore]`'d sibling test capturing the spec-correct expectation.
+// All four were fixed in `src/tracer.rs::emit_function_dfs` /
+// `compute_function_return_values` / `parse_let_binding_literals`;
+// the `#[ignore]` attributes have been removed and the per-program
+// strict tests above now assert on the spec-correct shapes directly.
 
 /// Skip-helper: returns `Some(path)` to ct-print or logs a clear
 /// `SKIP:` diagnostic and returns `None`.  The
@@ -857,29 +863,12 @@ fn assert_metadata_program_ends_with(
     );
 }
 
-/// Assert that every `call_exit` event carries a `Void` return_value.
-///
-/// RECORDER BUG: the recorder always passes `NONE_VALUE` to
-/// `register_return`, so genuine return values never reach the trace.
-/// A spec-compliant recorder would surface the actual function result
-/// (Int / Sequence / Struct / etc.) and the `#[ignore]`d sibling tests
-/// below capture that expectation.
-fn assert_all_call_exits_return_void(doc: &serde_json::Value) {
-    for ev in doc["events"].as_array().expect("events array") {
-        if ev["kind"] != "call_exit" {
-            continue;
-        }
-        let rv = &ev["return_value"];
-        assert_eq!(
-            rv["kind"].as_str(),
-            Some("Void"),
-            "call_exit.return_value must be Void today; got {rv} \
-             — if real return values have landed, update the per-program \
-             test to assert on them explicitly rather than weakening this \
-             check"
-        );
-    }
-}
+// Pre bug-fix 3 the test suite shared an `assert_all_call_exits_return_void`
+// helper because every `register_return` site in the recorder passed
+// `NONE_VALUE`.  Post-fix the per-program tests assert on the
+// per-callee real return values directly, so the shared helper is no
+// longer needed.  See `compute_function_return_values` in
+// `src/tracer.rs` for the value-recovery logic.
 
 // --- control_flow_test.cairo -----------------------------------------------
 
@@ -899,7 +888,13 @@ fn test_control_flow_test_via_ct_print_full() {
 
     assert_metadata_program_ends_with(&doc, &source_path);
 
-    // ----- Function table — order is writer-assignment (lexical) order
+    // ----- Function table — entries are ID'd in DFS visit order ------
+    // The recorder DFS-walks from `main`, so function ids follow the
+    // dynamic call order: main → compute → classify → loop_sum →
+    // match_pick.  Pre-fix the table reflected lexical declaration
+    // order (`[classify, loop_sum, match_pick, compute, main]`) but
+    // that violated the spec — see the bug-fix 1+2 comment in
+    // `tracer.rs::emit_source_trace`.
     let functions: Vec<&str> = doc["functions"]
         .as_array()
         .expect("functions array")
@@ -913,7 +908,7 @@ fn test_control_flow_test_via_ct_print_full() {
         .collect();
     assert_eq!(
         bare_fns,
-        vec!["classify", "loop_sum", "match_pick", "compute", "main"]
+        vec!["main", "compute", "classify", "loop_sum", "match_pick"]
     );
 
     // ----- Path table -------------------------------------------------
@@ -948,26 +943,27 @@ fn test_control_flow_test_via_ct_print_full() {
     assert_eq!(events.len(), 38, "events.len()");
     assert_step_indices_monotonic(&doc);
 
-    // ----- Call sequence ---------------------------------------------
-    // RECORDER BUG: the spec wants dynamic call order
-    // (main → compute → classify → loop_sum → match_pick).  Today the
-    // recorder walks the source linearly and emits one call_entry per
-    // function definition in lexical order.  See
-    // test_control_flow_test_call_sequence_dynamic_order below.
+    // ----- Call sequence: dynamic execution order --------------------
+    // Post bug-fix 1+2: the DFS rooted at `main` recurses through
+    // each callee's invocation site as it appears in the parent body,
+    // so the recorded call_entry sequence is the dynamic call order.
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "main".to_string(),
+            "compute".to_string(),
             "classify".to_string(),
             "loop_sum".to_string(),
             "match_pick".to_string(),
-            "compute".to_string(),
-            "main".to_string(),
         ]
     );
 
-    // ----- Call-exit order: today identical to entry order (LIFO would
-    // be the spec, but each function is "exited" the moment the parser
-    // sees the next `fn` keyword) -----------------------------------
+    // ----- Call-exit order: LIFO ------------------------------------
+    // Bug-fix 1+2 also gives the LIFO closing order: each callee's
+    // call_exit fires before the caller's, so depth-aware consumers
+    // can reconstruct the call tree.  For control_flow_test the LIFO
+    // post-order happens to coincide with the lexical order of the
+    // first three callees because they're sibling leaves of `compute`.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -979,7 +975,44 @@ fn test_control_flow_test_via_ct_print_full() {
         ]
     );
 
-    assert_all_call_exits_return_void(&doc);
+    // ----- Call-exit return values (bug-fix 3) -----------------------
+    // Each call_exit now carries the function's actual return value
+    // (`Int { i }`) instead of the legacy `Void`.  Values are
+    // recovered by `tracer.rs::compute_function_return_values` from
+    // the VM's `RunResultValue::Success` payload mapped onto the
+    // `let X = callee(...)` source pattern, then propagated through
+    // the `compute()` tuple-return slots.
+    let exit_returns: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"]
+                .as_i64()
+                .unwrap_or_else(|| {
+                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
+                });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![
+            ("classify".to_string(), 20),
+            ("loop_sum".to_string(), 3),
+            ("match_pick".to_string(), 100),
+            ("compute".to_string(), 123),
+            ("main".to_string(), 123),
+        ]
+    );
 
     // ----- Decoded variable values -----------------------------------
     // Only `compute()`'s let-bindings + the synthetic trailing
@@ -998,11 +1031,11 @@ fn test_control_flow_test_via_ct_print_full() {
     );
 }
 
+/// Regression pin for bug-fix 1+2: the dynamic-call-order DFS must
+/// surface `[main, compute, classify, loop_sum, match_pick]` as the
+/// first call_entry events of the trace.  Pre-fix the recorder walked
+/// the source linearly and reported lexical order.
 #[test]
-#[ignore = "RECORDER BUG: call_entry events are emitted in lexical \
-            source order, not dynamic execution order.  Spec-compliant \
-            output for this program should be \
-            [main, compute, classify, loop_sum, match_pick]."]
 fn test_control_flow_test_call_sequence_dynamic_order() {
     let Some((doc, _)) = record_and_dump_full(
         "test_control_flow_test_call_sequence_dynamic_order",
@@ -1050,9 +1083,16 @@ fn test_nested_calls_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
+    // Function table follows DFS visit order (bug-fix 1+2): main is
+    // discovered first, then compute, then compute's three callees in
+    // source-text order (`inner` on line 15 before `middle` on 16
+    // before `outer` on 17).  middle / outer also call inner / middle
+    // respectively but those callees were already visited at the
+    // compute level, so the visited-set short-circuits keep the call
+    // table at the spec-pinned 5 entries.
     assert_eq!(
         bare_fns,
-        vec!["inner", "middle", "outer", "compute", "main"]
+        vec!["main", "compute", "inner", "middle", "outer"]
     );
 
     // ----- counts -----------------------------------------------------
@@ -1077,21 +1117,25 @@ fn test_nested_calls_test_via_ct_print_full() {
     assert_eq!(events.len(), 25, "events.len()");
     assert_step_indices_monotonic(&doc);
 
-    // ----- Call sequence: lexical order (RECORDER BUG — see sibling
-    // #[ignore] test below).
+    // ----- Call sequence: dynamic execution order --------------------
+    // Bug-fix 1+2: DFS from `main` recurses through compute's three
+    // call sites in source-text order (`inner`, `middle`, `outer`).
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "main".to_string(),
+            "compute".to_string(),
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
-            "compute".to_string(),
-            "main".to_string(),
-        ],
-        "call_entry events appear in lexical source order today \
-         (RECORDER BUG: should be dynamic call order)"
+        ]
     );
 
+    // ----- Call-exit order: LIFO -------------------------------------
+    // Bug-fix 1+2: each callee's call_exit fires before its caller's,
+    // so the post-order matches `[inner, middle, outer, compute,
+    // main]` — exactly the LIFO closing order depth-aware consumers
+    // need to reconstruct the call tree.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -1103,7 +1147,45 @@ fn test_nested_calls_test_via_ct_print_full() {
         ]
     );
 
-    assert_all_call_exits_return_void(&doc);
+    // ----- Call-exit return values (bug-fix 3) -----------------------
+    // Each function surfaces its real return value on call_exit.
+    // Values flow from compute's tuple-return slots:
+    //   inner(1, 2)  = 3  → b → inner=3
+    //   middle(1)    = 11 → c → middle=11
+    //   outer(1)     = 111 → d → outer=111
+    // compute's tail tuple's last named slot is `d=111`; main
+    // delegates to compute.
+    let exit_returns: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"]
+                .as_i64()
+                .unwrap_or_else(|| {
+                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
+                });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![
+            ("inner".to_string(), 3),
+            ("middle".to_string(), 11),
+            ("outer".to_string(), 111),
+            ("compute".to_string(), 111),
+            ("main".to_string(), 111),
+        ]
+    );
 
     // ----- Decoded values --------------------------------------------
     // The chain executes:
@@ -1123,11 +1205,11 @@ fn test_nested_calls_test_via_ct_print_full() {
     );
 }
 
+/// Regression pin for bug-fix 1+2: nested calls produce LIFO
+/// call_exit ordering (inner before middle before outer before
+/// compute before main) so depth-aware consumers can reconstruct the
+/// call tree.
 #[test]
-#[ignore = "RECORDER BUG: nested calls should produce LIFO call_exit \
-            ordering (inner before middle before outer).  Today every \
-            user function is closed in lexical order, so depth-aware \
-            consumers cannot reconstruct the call tree."]
 fn test_nested_calls_test_lifo_call_exit_order() {
     let Some((doc, _)) = record_and_dump_full(
         "test_nested_calls_test_lifo_call_exit_order",
@@ -1147,12 +1229,11 @@ fn test_nested_calls_test_lifo_call_exit_order() {
     );
 }
 
+/// Regression pin for bug-fix 3: call_exit events surface their
+/// real return values (inner=3, middle=11, outer=111, compute=111,
+/// main=111) so callers can replay the call tree without
+/// re-deriving the values from step-binding heuristics.
 #[test]
-#[ignore = "RECORDER BUG: call_exit.return_value is always Void.  A \
-            spec-compliant recorder would surface inner=3, middle=11, \
-            outer=111, compute=111, main=111 on the call_exit events \
-            so callers can replay the call tree without re-deriving \
-            the values from step-binding heuristics."]
 fn test_nested_calls_test_call_exit_returns_real_values() {
     let Some((doc, _)) = record_and_dump_full(
         "test_nested_calls_test_call_exit_returns_real_values",
@@ -1199,9 +1280,11 @@ fn test_collections_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
+    // Function table follows DFS visit order (bug-fix 1+2): main →
+    // compute → array_total (called first in compute) → pair_sum.
     assert_eq!(
         bare_fns,
-        vec!["array_total", "pair_sum", "compute", "main"]
+        vec!["main", "compute", "array_total", "pair_sum"]
     );
 
     // ----- counts -----------------------------------------------------
@@ -1221,8 +1304,21 @@ fn test_collections_test_via_ct_print_full() {
     assert_eq!(events.len(), 28, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // Bug-fix 1+2: dynamic call order is main → compute → array_total
+    // → pair_sum.  Bug-fix 1+2 (LIFO exit) and bug-fix 3 (real
+    // returns) drive the per-callee return values surfaced below.
     assert_eq!(
         observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "compute".to_string(),
+            "array_total".to_string(),
+            "pair_sum".to_string(),
+        ]
+    );
+
+    assert_eq!(
+        observed_exit_sequence(&doc),
         vec![
             "array_total".to_string(),
             "pair_sum".to_string(),
@@ -1231,7 +1327,39 @@ fn test_collections_test_via_ct_print_full() {
         ]
     );
 
-    assert_all_call_exits_return_void(&doc);
+    // Bug-fix 3: array_total returns 4 (Array<felt252>::len), pair_sum
+    // returns 30 (10 + 20), compute's tail tuple's last named slot is
+    // `final_sum=34`, main delegates.
+    let exit_returns: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"]
+                .as_i64()
+                .unwrap_or_else(|| {
+                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
+                });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![
+            ("array_total".to_string(), 4),
+            ("pair_sum".to_string(), 30),
+            ("compute".to_string(), 34),
+            ("main".to_string(), 34),
+        ]
+    );
 
     // ----- Decoded values --------------------------------------------
     // The recorder emits a `ValueRecord::Sequence` for the literal-only
@@ -1243,14 +1371,20 @@ fn test_collections_test_via_ct_print_full() {
     //   array_total() returns 4 (the length of [1,2,3,4])
     //   pair_sum()    returns 30 (10 + 20)
     //   final_sum     = 4 + 30 = 34
+    //
+    // Bug-fix 1+2 changed the surfacing order: each `let X = callee()`
+    // line in compute first emits the scalar `X = callee_result` and
+    // then recurses into the callee, where the compound binding fires
+    // on its own `emit_line`.  So `arr_total` precedes `arr` (callee
+    // contents) and `pair_total` precedes `pair`.
     let observed = observed_var_kinds(&doc);
     assert_eq!(
         observed,
         vec![
-            ("arr".to_string(), "Sequence".to_string()),
-            ("pair".to_string(), "Tuple".to_string()),
             ("arr_total".to_string(), "Int".to_string()),
+            ("arr".to_string(), "Sequence".to_string()),
             ("pair_total".to_string(), "Int".to_string()),
+            ("pair".to_string(), "Tuple".to_string()),
             ("final_sum".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
@@ -1337,12 +1471,14 @@ fn test_collections_test_value_kinds_present() {
 /// "CairoPanic", ...)`, so we expect exactly one `io_event` of kind
 /// `ioError` containing the panic payload.
 ///
-/// RECORDER BUG (documented inline): the panic still leaves the
-/// `compute()` let-bindings populated from the **panic vector** (not
-/// the source-evaluated values), so `a` and `b` decode as 0 — the
-/// first two entries of the panic payload.  A spec-compliant recorder
-/// would either leave the let-bindings absent on a panic or carry the
-/// real source-level values.
+/// Bug-fix 4 lock-in: source-level let-bindings whose RHS is a
+/// statically-evaluable literal (`let a: felt252 = 10;`) keep their
+/// real source values across a panic.  Pre-fix `a` decoded as the
+/// first felt of the panic encoding (0 after i64 overflow); now it
+/// surfaces as 10 because `parse_let_binding_literals` seeds the
+/// var-values map before the VM is ever consulted.  `b`'s RHS is the
+/// panicking call so no value is recoverable for it — it's omitted
+/// from the trace's step variables instead of being wrong.
 #[test]
 fn test_error_paths_test_via_ct_print_full() {
     let Some((doc, source_path)) = record_and_dump_full(
@@ -1364,7 +1500,9 @@ fn test_error_paths_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["divide", "compute", "main"]);
+    // Function table follows DFS visit order (bug-fix 1+2): main →
+    // compute → divide.
+    assert_eq!(bare_fns, vec!["main", "compute", "divide"]);
 
     // ----- counts -----------------------------------------------------
     // 10 steps + 3 calls + 1 io_event (the panic).
@@ -1382,8 +1520,20 @@ fn test_error_paths_test_via_ct_print_full() {
     assert_eq!(events.len(), 17, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // Bug-fix 1+2: dynamic call order is main → compute → divide.
     assert_eq!(
         observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "compute".to_string(),
+            "divide".to_string(),
+        ]
+    );
+
+    // LIFO closing — divide closes first (mid-panic), then compute,
+    // then main.
+    assert_eq!(
+        observed_exit_sequence(&doc),
         vec![
             "divide".to_string(),
             "compute".to_string(),
@@ -1391,7 +1541,21 @@ fn test_error_paths_test_via_ct_print_full() {
         ]
     );
 
-    assert_all_call_exits_return_void(&doc);
+    // Every call_exit on a panicked frame surfaces `Void` because the
+    // VM never returned.  `compute_function_return_values` returns
+    // `None` for every function on a panic run (no `Success` payload
+    // to read), and `emit_function_dfs` maps `None` to `NONE_VALUE`.
+    for ev in events {
+        if ev["kind"] != "call_exit" {
+            continue;
+        }
+        let rv = &ev["return_value"];
+        assert_eq!(
+            rv["kind"].as_str(),
+            Some("Void"),
+            "call_exit on a panicked program should be Void; got {rv}"
+        );
+    }
 
     // ----- The panic event -------------------------------------------
     let io_events: Vec<&serde_json::Value> = events
@@ -1416,29 +1580,23 @@ fn test_error_paths_test_via_ct_print_full() {
     );
 
     // ----- Decoded variable values -----------------------------------
-    // RECORDER BUG: `a` and `b` are populated from the panic-payload
-    // vector (the first two felts of the Cairo panic encoding), not
-    // from the source-level values (`a = 10`, `b = divide(a, 0)`).
-    // The first panic felt is too large to fit in i64 so it falls
-    // back to 0, and the second is the divisor (0).  See sibling
-    // `#[ignore]` test below.
+    // Post bug-fix 4: `a` keeps its source-evaluated value (10), `b`'s
+    // RHS panicked so it's omitted from the trace, and the synthetic
+    // trailing `return_value` is omitted because the panic prevented
+    // `main` from producing a value.
     assert_eq!(
         observed_var_sequence(&doc),
         vec![
-            ("a".to_string(), 0),
-            ("b".to_string(), 0),
-            ("return_value".to_string(), 16),
+            ("a".to_string(), 10),
         ]
     );
 }
 
+/// Regression pin for bug-fix 4: when a Cairo program panics, source-
+/// level let-bindings whose RHS was already evaluated keep the real
+/// source value (`a = 10`) instead of being clobbered by the
+/// panic-payload vector.
 #[test]
-#[ignore = "RECORDER BUG: when a Cairo program panics, source-level \
-            let-bindings should keep the values they actually held at \
-            the panic point (`a = 10`).  The recorder currently maps \
-            the panic-payload vector onto the let-binding names by \
-            index, so `a` decodes as the first felt of the panic \
-            encoding (0 after i64 overflow)."]
 fn test_error_paths_test_let_bindings_keep_source_values() {
     let Some((doc, _)) = record_and_dump_full(
         "test_error_paths_test_let_bindings_keep_source_values",
