@@ -1,0 +1,39 @@
+{
+  "test_name": "test_counter_increment",
+  "contract_address": "0x1",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xcafe",
+      "selector": "increment",
+      "calldata": ["7"]
+    },
+    {
+      "type": "storage_read",
+      "contract": "0xcafe",
+      "key": "value",
+      "value": "0"
+    },
+    {
+      "type": "storage_write",
+      "contract": "0xcafe",
+      "key": "value",
+      "old_value": "0",
+      "new_value": "7"
+    },
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xcafe",
+      "selector": "get",
+      "calldata": []
+    },
+    {
+      "type": "storage_read",
+      "contract": "0xcafe",
+      "key": "value",
+      "value": "7"
+    }
+  ]
+}
