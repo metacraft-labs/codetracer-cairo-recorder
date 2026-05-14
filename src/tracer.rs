@@ -461,19 +461,64 @@ impl CairoTracer {
 
         // ---- walk body lines -----------------------------------------
         let lines: Vec<&str> = entry.body.lines().collect();
+        // Per-function simulator env, used by the `while` loop expander
+        // (M11 fix) to evaluate the loop's condition + propagate
+        // mutating assignments to subsequent iterations.  Seeded
+        // lazily from `let mut <name>: <T> = <int_lit>;` initialisers
+        // we encounter while walking so the simulator has the right
+        // counter / accumulator values when it enters the loop.
+        let mut sim_env: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         // `entry.body` is the full source — we still need indices into
         // it.  Use the absolute (1-based) line numbers stored on the
         // entry so step events match the canonical paths table.
-        for line_offset in 0..entry.line_count {
+        let mut line_offset: usize = 0;
+        while line_offset < entry.line_count {
             let abs_line = entry.start_line + line_offset as u32;
             let line_text = lines.get(abs_line as usize - 1).copied().unwrap_or("");
             let trimmed = line_text.trim();
 
+            // M11 fix: when this line opens a recognised `while`
+            // loop, hand control to the per-iteration simulator and
+            // skip past the body in the linear walk.  The simulator
+            // emits one step per iteration per body line (plus a
+            // re-emission of the header on each iteration), giving
+            // the spec-correct execution-count-driven shape that
+            // `test_loop_while_for_test_per_iteration_steps_pin`
+            // pins down.  Loops we can't recognise (unparseable
+            // condition / body, nested loops) fall through to the
+            // line-by-line static walk.
+            if let Some(loop_idx) = entry
+                .while_loops
+                .iter()
+                .position(|w| w.header_line == abs_line)
+            {
+                let wl = &entry.while_loops[loop_idx];
+                if self.simulate_while_loop(source_path, wl, &mut sim_env, felt_type_id) {
+                    // Resume just past the closing `};` line.
+                    let closing_offset = (wl.closing_line - entry.start_line) as usize;
+                    line_offset = closing_offset + 1;
+                    continue;
+                }
+                // Simulator declined (typically: condition references
+                // a value the recorder doesn't yet know — e.g. a
+                // function parameter).  Fall through to the static
+                // walk so the per-line step events still surface.
+            }
+
             if trimmed.is_empty() || trimmed == "}" || trimmed == "{" {
+                line_offset += 1;
                 continue;
             }
 
             TraceWriter::register_step(&mut *self.writer, source_path, Line(abs_line as i64));
+
+            // Seed the simulator env from any `let mut <name> = <int>;`
+            // line we just stepped past — this is what gives the
+            // `while`-loop simulator (above) `acc = 0` / `i = 0`
+            // before it starts iterating.
+            if let Some((name, val)) = parse_let_int_init(line_text) {
+                sim_env.insert(name, val);
+            }
 
             // Emit scalar variable values for any let-binding declared
             // on this line.  Values originate from `var_values`, which
@@ -525,6 +570,7 @@ impl CairoTracer {
                     visited,
                 );
             }
+            line_offset += 1;
         }
 
         // ---- register_return -----------------------------------------
@@ -561,6 +607,91 @@ impl CairoTracer {
         }
 
         TraceWriter::register_return(&mut *self.writer, return_value);
+    }
+
+    /// Replay a recognised `while` loop one iteration at a time so the
+    /// trace surfaces the spec-correct execution-count-driven step
+    /// pattern (see `test_loop_while_for_test_per_iteration_steps_pin`).
+    ///
+    /// Each iteration emits:
+    /// 1. one step at the loop's header line (the condition check).
+    /// 2. one step at every body line (skipping blank / `}`-only
+    ///    lines, matching the same filter the linear walk uses).
+    /// 3. for any body line whose statement is a recognised
+    ///    assignment (`<name> = <expr>;`), one
+    ///    `register_variable_with_full_value` carrying the post-update
+    ///    `i64` value of the target.
+    ///
+    /// We also re-emit a final header step once the condition turns
+    /// false so the trace surfaces the exit decision (matching how a
+    /// human-driven step would land on the `while` keyword one last
+    /// time before falling through).  That trailing step never
+    /// emits variable updates.
+    ///
+    /// A safety cap (`MAX_ITERS = 1_000`) bounds the simulator so a
+    /// pathological condition (e.g. `while i < 3 { /* no update */ }`)
+    /// can't lock the recorder up.  Hitting the cap emits a warning
+    /// to stderr and returns — the trace stays partial but valid.
+    fn simulate_while_loop(
+        &mut self,
+        source_path: &Path,
+        wl: &WhileLoop,
+        env: &mut std::collections::HashMap<String, i64>,
+        felt_type_id: codetracer_trace_types::TypeId,
+    ) -> bool {
+        const MAX_ITERS: u32 = 1_000;
+        // First, probe the initial condition.  If it doesn't evaluate
+        // — typically because the loop's bound is a function parameter
+        // we don't (yet) propagate — give up entirely so the caller
+        // can fall back to the static one-step-per-line walk.  This
+        // keeps the per-fixture step counts stable for fixtures whose
+        // bounds aren't recorder-known.
+        if eval_expr(&wl.condition, env).is_none() {
+            return false;
+        }
+        let mut iters = 0u32;
+        while let Some(cond) = eval_expr(&wl.condition, env) {
+            // Header step (re-emitted each iteration so consumers can
+            // count loop iterations from the trace alone).
+            TraceWriter::register_step(&mut *self.writer, source_path, Line(wl.header_line as i64));
+            if cond == 0 {
+                break;
+            }
+            // Body — one step per line + variable update for parsed
+            // assignments.  We emit a step for *every* body line in
+            // the parsed range (including unrecognised ones) so the
+            // step_index sequence stays dense and aligned with the
+            // source.  Lines we couldn't parse just don't contribute
+            // a variable update.
+            for (offset, stmt) in wl.body_statements.iter().enumerate() {
+                let abs = wl.body_start_line + offset as u32;
+                TraceWriter::register_step(&mut *self.writer, source_path, Line(abs as i64));
+                if let Some(s) = stmt {
+                    if let Some(new_val) = eval_expr(&s.rhs, env) {
+                        env.insert(s.target.clone(), new_val);
+                        let value = ValueRecord::Int {
+                            i: new_val,
+                            type_id: felt_type_id,
+                        };
+                        TraceWriter::register_variable_with_full_value(
+                            &mut *self.writer,
+                            &s.target,
+                            value,
+                        );
+                    }
+                }
+            }
+            iters += 1;
+            if iters >= MAX_ITERS {
+                eprintln!(
+                    "while-loop simulator hit safety cap of {MAX_ITERS} iterations \
+                     at line {}; trace will be partial",
+                    wl.header_line
+                );
+                break;
+            }
+        }
+        true
     }
 
     /// Lazily register the `Array<felt252>` type id for compound Sequence
@@ -723,6 +854,78 @@ struct FunctionEntry {
     /// call syntax (`foo(...)`), which covers everything the test
     /// fixtures exercise.
     callees_per_line: Vec<Vec<String>>,
+    /// `while` loops detected inside this function body.  Each entry
+    /// records the absolute (1-based) header line, the body's first /
+    /// last lines, and the (parsed) condition expression so the DFS
+    /// can replay the loop one iteration at a time — matching the
+    /// spec's "one step per executed iteration" expectation rather
+    /// than the static-DFS "one step per source line" approximation.
+    /// See `parse_while_loops` for the exact shape recognised.
+    while_loops: Vec<WhileLoop>,
+}
+
+/// Statically-recovered shape of a `while` loop in a Cairo function
+/// body.  `header_line` is the line of the `while <cond> {` keyword;
+/// `body_start_line` is the first body line (one past the header);
+/// the body extends for `body_statements.len()` lines.  `closing_line`
+/// points at the line holding the matching `};` (or `}` if the user
+/// omits the trailing semicolon) so the linear walker can resume
+/// exactly past the loop.
+///
+/// The `condition` and per-statement parses use a deliberately tiny
+/// expression grammar (integer literals + bare identifiers + the
+/// arithmetic / comparison / logical operators the fixtures exercise).
+/// Anything outside that grammar makes `parse_while_loops` skip the
+/// loop, so the recorder degrades back to one-step-per-source-line
+/// for unrecognised shapes rather than mis-recording.
+#[derive(Debug, Clone)]
+struct WhileLoop {
+    header_line: u32,
+    body_start_line: u32,
+    closing_line: u32,
+    condition: Expr,
+    /// Per-body-line parse: `Some(stmt)` if we recognised the
+    /// assignment shape (`<name> = <expr>;`), `None` otherwise.  An
+    /// unrecognised body line still emits a step but contributes no
+    /// variable update for the simulator's env.
+    body_statements: Vec<Option<Statement>>,
+}
+
+/// One recognised statement inside a `while` body — the simulator's
+/// only mutation handle.  Today we only need plain assignment to a
+/// previously-declared mutable binding (e.g. `acc = acc + 1;`); the
+/// fixture's two loops fit entirely in this shape.
+#[derive(Debug, Clone)]
+struct Statement {
+    target: String,
+    rhs: Expr,
+}
+
+/// Tiny arithmetic / comparison / logical expression AST used by the
+/// `while`-loop simulator.  The evaluator (`eval_expr`) returns `i64`
+/// for arithmetic and `0`/`1` for boolean predicates — matching the
+/// felt252-shaped scalar values the rest of the recorder already
+/// stores in `var_values`.
+#[derive(Debug, Clone)]
+enum Expr {
+    Lit(i64),
+    Var(String),
+    Bin(BinOp, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    And,
+    Or,
 }
 
 /// Compound (collection-shaped) let-binding extracted from the Cairo
@@ -1169,6 +1372,8 @@ fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEn
             callees_per_line.push(parse_callees_in_line(lines[k], user_functions));
         }
 
+        let while_loops = parse_while_loops(&lines, start, end);
+
         entries.push(FunctionEntry {
             bare_name,
             full_name,
@@ -1176,9 +1381,386 @@ fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEn
             line_count: end - start + 1,
             body: source.to_string(),
             callees_per_line,
+            while_loops,
         });
     }
     entries
+}
+
+/// Walk the function body's lines and recognise top-level `while` loops
+/// of the shape:
+///
+/// ```cairo
+/// while <expr> {
+///     <name> = <expr>;
+///     <name> = <expr>;
+///     ...
+/// };
+/// ```
+///
+/// Loops with bodies whose statements aren't bare assignments are still
+/// detected (the simulator still emits a step + re-runs the condition
+/// check) — only the per-statement variable-update side-effect is
+/// dropped on those unrecognised bodies.  Loops whose condition fails
+/// to parse, or whose closing `}`/`};` we cannot find, are left to the
+/// fall-back static walk.
+///
+/// `start` / `end` are 0-based inclusive line indices into `lines`,
+/// covering exactly the function body (including the outer `{` and
+/// closing `}`).
+fn parse_while_loops(lines: &[&str], start: usize, end: usize) -> Vec<WhileLoop> {
+    let mut out = Vec::new();
+    // Track brace depth relative to the function's own opening `{`.
+    // depth 1 == inside the function body (top-level statements).
+    // We only recover loops at depth 1 — nested inner loops would
+    // require recursive handling, which the fixture doesn't exercise.
+    let mut depth: i32 = 0;
+    let mut k = start;
+    while k <= end {
+        let raw = lines[k];
+        let trimmed = raw.trim();
+        let opens = trimmed.matches('{').count() as i32;
+        let closes = trimmed.matches('}').count() as i32;
+
+        if depth == 1 && trimmed.starts_with("while ") && trimmed.ends_with('{') {
+            // Header at depth 1; body starts at k+1, depth bumps to 2
+            // immediately after this line.
+            let cond_text = trimmed
+                .trim_start_matches("while ")
+                .trim_end_matches('{')
+                .trim();
+            let condition = match parse_expr(cond_text) {
+                Some(e) => e,
+                None => {
+                    depth += opens - closes;
+                    k += 1;
+                    continue;
+                }
+            };
+            // Find the matching `}` for this loop, scanning forward at
+            // depth 2 → 1.
+            let header_line = (k + 1) as u32;
+            let body_start = k + 1;
+            let mut local_depth: i32 = 1;
+            let mut body_end_idx: Option<usize> = None;
+            let mut closing_idx: Option<usize> = None;
+            for (j, raw_line) in lines.iter().enumerate().take(end + 1).skip(k + 1) {
+                let lt = raw_line.trim();
+                let o = lt.matches('{').count() as i32;
+                let c = lt.matches('}').count() as i32;
+                local_depth += o - c;
+                if local_depth == 0 {
+                    closing_idx = Some(j);
+                    body_end_idx = Some(if j == 0 { 0 } else { j - 1 });
+                    break;
+                }
+            }
+            let (body_end, closing) = match (body_end_idx, closing_idx) {
+                (Some(b), Some(c)) => (b, c),
+                _ => {
+                    depth += opens - closes;
+                    k += 1;
+                    continue;
+                }
+            };
+            // Parse each body line as an optional `<name> = <expr>;`
+            // statement.  Lines we can't parse still get steps emitted
+            // — the simulator just doesn't update the env from them.
+            let mut body_statements = Vec::with_capacity(body_end - body_start + 1);
+            for raw_line in lines.iter().take(body_end + 1).skip(body_start) {
+                let lt = raw_line.trim();
+                if lt.is_empty() {
+                    body_statements.push(None);
+                    continue;
+                }
+                body_statements.push(parse_assignment_statement(lt));
+            }
+
+            out.push(WhileLoop {
+                header_line,
+                body_start_line: (body_start + 1) as u32,
+                closing_line: (closing + 1) as u32,
+                condition,
+                body_statements,
+            });
+            // Advance past the loop's closing brace.  The header's
+            // `{` and the closing line's matching `}` are equal in
+            // count for any well-formed loop, so the function-body
+            // brace depth is unchanged across the consumed range.
+            k = closing + 1;
+            continue;
+        }
+
+        depth += opens - closes;
+        k += 1;
+    }
+    out
+}
+
+/// Parse `<name> = <expr>;` where `<name>` is a bare identifier and
+/// `<expr>` is one our `parse_expr` recogniser handles.  Returns
+/// `None` for shapes outside this very small grammar — the simulator
+/// then emits a step on the line but does not update any variable.
+fn parse_assignment_statement(line: &str) -> Option<Statement> {
+    let stripped = line.trim().trim_end_matches(';').trim();
+    let eq = stripped.find('=')?;
+    // Ignore `==`, `<=`, `>=`, `!=` — those are comparisons inside an
+    // expression, not assignment.
+    let rest_after = stripped.as_bytes().get(eq + 1).copied().unwrap_or(b' ');
+    let prev = if eq > 0 {
+        stripped.as_bytes()[eq - 1]
+    } else {
+        b' '
+    };
+    if rest_after == b'=' || prev == b'<' || prev == b'>' || prev == b'!' || prev == b'=' {
+        return None;
+    }
+    let target = stripped[..eq].trim().to_string();
+    if target.is_empty()
+        || !target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let rhs_text = stripped[eq + 1..].trim();
+    let rhs = parse_expr(rhs_text)?;
+    Some(Statement { target, rhs })
+}
+
+/// Parse a tiny expression grammar:
+///
+/// ```text
+/// expr   = or_expr
+/// or     = and (`||` and)*
+/// and    = cmp (`&&` cmp)*
+/// cmp    = sum ((`<`|`<=`|`>`|`>=`|`==`|`!=`) sum)?
+/// sum    = term ((`+`|`-`) term)*
+/// term   = atom ((`*`) atom)*
+/// atom   = INT | IDENT | `(` expr `)`
+/// ```
+///
+/// Returns `None` for inputs outside this grammar — the caller treats
+/// a `None` parse as "skip the loop's simulator path" (the fall-back
+/// static walk still runs).
+fn parse_expr(input: &str) -> Option<Expr> {
+    let mut p = ExprParser::new(input);
+    let e = p.parse_or()?;
+    p.skip_ws();
+    if !p.at_end() {
+        return None;
+    }
+    Some(e)
+}
+
+struct ExprParser<'a> {
+    src: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ExprParser<'a> {
+    fn new(s: &'a str) -> Self {
+        Self {
+            src: s.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.pos < self.src.len() && self.src[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.src.len()
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.src.get(self.pos).copied()
+    }
+
+    fn eat_str(&mut self, s: &str) -> bool {
+        if self.src[self.pos..].starts_with(s.as_bytes()) {
+            self.pos += s.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_or(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_and()?;
+        loop {
+            self.skip_ws();
+            if !self.eat_str("||") {
+                break;
+            }
+            let rhs = self.parse_and()?;
+            lhs = Expr::Bin(BinOp::Or, Box::new(lhs), Box::new(rhs));
+        }
+        Some(lhs)
+    }
+
+    fn parse_and(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_cmp()?;
+        loop {
+            self.skip_ws();
+            if !self.eat_str("&&") {
+                break;
+            }
+            let rhs = self.parse_cmp()?;
+            lhs = Expr::Bin(BinOp::And, Box::new(lhs), Box::new(rhs));
+        }
+        Some(lhs)
+    }
+
+    fn parse_cmp(&mut self) -> Option<Expr> {
+        let lhs = self.parse_sum()?;
+        self.skip_ws();
+        // Order matters — try the two-character variants first.
+        let op = if self.eat_str("<=") {
+            BinOp::Le
+        } else if self.eat_str(">=") {
+            BinOp::Ge
+        } else if self.eat_str("==") {
+            BinOp::Eq
+        } else if self.eat_str("!=") {
+            BinOp::Ne
+        } else if self.peek() == Some(b'<') {
+            self.pos += 1;
+            BinOp::Lt
+        } else if self.peek() == Some(b'>') {
+            self.pos += 1;
+            BinOp::Gt
+        } else {
+            return Some(lhs);
+        };
+        let rhs = self.parse_sum()?;
+        Some(Expr::Bin(op, Box::new(lhs), Box::new(rhs)))
+    }
+
+    fn parse_sum(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_term()?;
+        loop {
+            self.skip_ws();
+            let op = match self.peek() {
+                Some(b'+') => BinOp::Add,
+                Some(b'-') => BinOp::Sub,
+                _ => break,
+            };
+            // Avoid matching `||` / `&&` etc. against `-`/`+`; not
+            // needed since those use `&` / `|`.
+            self.pos += 1;
+            let rhs = self.parse_term()?;
+            lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs));
+        }
+        Some(lhs)
+    }
+
+    fn parse_term(&mut self) -> Option<Expr> {
+        let mut lhs = self.parse_atom()?;
+        loop {
+            self.skip_ws();
+            if self.peek() == Some(b'*') {
+                self.pos += 1;
+                let rhs = self.parse_atom()?;
+                lhs = Expr::Bin(BinOp::Mul, Box::new(lhs), Box::new(rhs));
+            } else {
+                break;
+            }
+        }
+        Some(lhs)
+    }
+
+    fn parse_atom(&mut self) -> Option<Expr> {
+        self.skip_ws();
+        let c = self.peek()?;
+        if c == b'(' {
+            self.pos += 1;
+            let e = self.parse_or()?;
+            self.skip_ws();
+            if self.peek() != Some(b')') {
+                return None;
+            }
+            self.pos += 1;
+            return Some(e);
+        }
+        if c.is_ascii_digit() {
+            let start = self.pos;
+            while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            let lit = std::str::from_utf8(&self.src[start..self.pos]).ok()?;
+            let v: i64 = lit.parse().ok()?;
+            return Some(Expr::Lit(v));
+        }
+        if c.is_ascii_alphabetic() || c == b'_' {
+            let start = self.pos;
+            while self.pos < self.src.len()
+                && (self.src[self.pos].is_ascii_alphanumeric() || self.src[self.pos] == b'_')
+            {
+                self.pos += 1;
+            }
+            let ident = std::str::from_utf8(&self.src[start..self.pos])
+                .ok()?
+                .to_string();
+            return Some(Expr::Var(ident));
+        }
+        None
+    }
+}
+
+/// Evaluate an `Expr` against an environment of `i64`-valued
+/// variables.  Comparisons return `1` for true / `0` for false so
+/// the simulator can keep a uniform `i64` carrier.
+fn eval_expr(expr: &Expr, env: &std::collections::HashMap<String, i64>) -> Option<i64> {
+    match expr {
+        Expr::Lit(v) => Some(*v),
+        Expr::Var(name) => env.get(name).copied(),
+        Expr::Bin(op, l, r) => {
+            let lv = eval_expr(l, env)?;
+            let rv = eval_expr(r, env)?;
+            Some(match op {
+                BinOp::Add => lv.wrapping_add(rv),
+                BinOp::Sub => lv.wrapping_sub(rv),
+                BinOp::Mul => lv.wrapping_mul(rv),
+                BinOp::Lt => (lv < rv) as i64,
+                BinOp::Le => (lv <= rv) as i64,
+                BinOp::Gt => (lv > rv) as i64,
+                BinOp::Ge => (lv >= rv) as i64,
+                BinOp::Eq => (lv == rv) as i64,
+                BinOp::Ne => (lv != rv) as i64,
+                BinOp::And => ((lv != 0) && (rv != 0)) as i64,
+                BinOp::Or => ((lv != 0) || (rv != 0)) as i64,
+            })
+        }
+    }
+}
+
+/// Recover the integer initialiser bound to a `let [mut] <name>[: <T>]
+/// = <int_lit>;` line.  Used by the `while`-loop simulator to seed
+/// its env with the values of mutable accumulators / counters
+/// declared earlier in the function body.
+fn parse_let_int_init(line: &str) -> Option<(String, i64)> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("let ")?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+    let name = if let Some(colon) = lhs.find(':') {
+        lhs[..colon].trim_start_matches("mut ").trim().to_string()
+    } else {
+        lhs.trim_start_matches("mut ").trim().to_string()
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let v: i64 = rhs.parse().ok()?;
+    Some((name, v))
 }
 
 /// Detect direct calls to user-defined functions on a single source

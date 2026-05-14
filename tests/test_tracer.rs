@@ -2011,15 +2011,19 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
 
 // --- loop_while_for_test.cairo --------------------------------------------
 
-/// Records `loop_while_for_test.cairo` and pins the **current**
-/// per-source-line stepping behaviour for `while` loops: each line of
-/// the loop body fires exactly one step regardless of iteration
-/// count.  See the sibling `#[ignore]`d
-/// `test_loop_while_for_test_per_iteration_steps_pin` for the
-/// spec-correct expectation (one step per loop iteration).  Once the
-/// recorder grows backward-jump detection, that pin will move from
-/// `#[ignore]` to live, and this test's step / event counts will need
-/// to be relaxed accordingly.
+/// Records `loop_while_for_test.cairo` and pins the **post-M11** per-
+/// iteration stepping behaviour for `while` loops: the recorder
+/// re-emits the loop's body lines once per executed iteration (and
+/// re-emits the header line on each condition check + once at the
+/// final exit).  Each recognised body assignment also surfaces a step
+/// variable carrying the post-update value, so `acc` / `i` walk the
+/// same value sequence the VM would have produced (1,2,3 then 10,20
+/// for `acc`; 1,2,3 then 1,2 for `i`).
+///
+/// See the sibling `test_loop_while_for_test_per_iteration_steps_pin`
+/// — both tests now exercise the same code path; the pin keeps the
+/// `acc_count >= 5` floor so a regression that drops back to one-
+/// step-per-source-line (the pre-M11 shape) fails loudly there too.
 #[test]
 fn test_loop_while_for_test_via_ct_print_full() {
     let Some((doc, source_path)) = record_and_dump_full(
@@ -2047,12 +2051,23 @@ fn test_loop_while_for_test_via_ct_print_full() {
     );
 
     // ----- counts -----------------------------------------------------
-    // The static-DFS walker emits one step per non-empty / non-brace
-    // source line.  loop_three / loop_double bodies span 9 lines each,
-    // compute spans 7, main spans 3, plus the trailing return_value
-    // step gives 24 steps total (no per-iteration loop expansion).
+    // Post-M11 the recorder unrolls each `while` loop one iteration
+    // at a time.  Step accounting:
+    //
+    //   loop_three (3 iters): fn header(1) + 2 lets(2) + 3 iters
+    //                          × (header + 2 body) + 1 trailing
+    //                          header for the false condition + 1
+    //                          tail line (`acc`) = 14
+    //                          (the closing `};` is consumed by the
+    //                          simulator and does not surface)
+    //   loop_double (2 iters): same shape with 2 iters → 11
+    //   compute:               5 lines, all let-bindings + tail
+    //   main:                  2 lines (fn header + `compute()`)
+    //   start():               implicit start step at line 1
+    //
+    // Total: 14 + 11 + 5 + 2 + 1 = 33.
     let counts = &doc["counts"];
-    assert_eq!(counts["steps"].as_u64(), Some(24), "steps; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(33), "steps; counts={counts}");
     assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
@@ -2061,8 +2076,8 @@ fn test_loop_while_for_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 24 steps + 4 call_entry + 4 call_exit = 32 events.
-    assert_eq!(events.len(), 32, "events.len()");
+    // 33 steps + 4 call_entry + 4 call_exit = 41 events.
+    assert_eq!(events.len(), 41, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + LIFO exit ---------------------------------
@@ -2085,28 +2100,62 @@ fn test_loop_while_for_test_via_ct_print_full() {
         ]
     );
 
-    // ----- Decoded variable values ------------------------------------
-    // Today's heuristic emits no scalar values for the loop fixture: the
-    // VM-known return value (23) is mapped onto whichever body's tail
-    // expression matches the longest tuple/bare-ident shape across all
-    // functions, and `compute()`'s tail (`total`) is the canonical bare
-    // ident — but `total` lives only in `compute`, so its value never
-    // surfaces as a step variable.  This matches the M9 known
-    // limitation.  The sibling `#[ignore]`'d test pins the spec-correct
-    // expectation (per-iteration `acc` updates).
-    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+    // ----- Per-iteration variable emissions --------------------------
+    // The simulator re-emits each body assignment's post-update value
+    // as a step variable, in iteration order.  loop_three (3 iters)
+    // updates acc to 1,2,3 with i to 1,2,3 in lockstep; loop_double
+    // (2 iters) updates acc to 10,20 with i to 1,2.  This is the same
+    // floor the sibling per_iteration_steps_pin asserts and the only
+    // pin in the recorder that ties trace shape to dynamic execution
+    // count, so a regression to source-line-only emission fails here
+    // loudly.
+    let var_seq: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| {
+            e["vars"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .map(|v| {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            let i = v["value"]["i"]
+                .as_i64()
+                .expect("loop simulator should emit Int values");
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        var_seq,
+        vec![
+            ("acc".to_string(), 1),
+            ("i".to_string(), 1),
+            ("acc".to_string(), 2),
+            ("i".to_string(), 2),
+            ("acc".to_string(), 3),
+            ("i".to_string(), 3),
+            ("acc".to_string(), 10),
+            ("i".to_string(), 1),
+            ("acc".to_string(), 20),
+            ("i".to_string(), 2),
+        ]
+    );
 }
 
-/// `#[ignore]`'d sibling pin for the loop-step expectation: the
-/// recorder should emit one step event for every executed iteration of
-/// each `while` loop, with the loop-counter and accumulator surfacing
-/// their per-iteration values.  Today the static-DFS walker emits one
-/// step per source line (regardless of execution count); fulfilling
-/// this pin requires backward-jump detection in the Sierra walker or
-/// fixture-time loop unrolling.  See M10 in
-/// `metacraft-specs/Cairo-StarkNet.status.org`.
+/// Spec floor for the loop-step expectation: the recorder must emit
+/// at least one `acc` step variable per executed iteration of each
+/// `while` loop in the fixture (3 iters in `loop_three` + 2 iters in
+/// `loop_double` = 5 minimum).  Pre-M11 the static-DFS walker emitted
+/// one step per source line regardless of execution count and this
+/// test was `#[ignore]`'d; M11 added a tiny source-AST simulator
+/// (`tracer.rs::simulate_while_loop`) that re-emits the body of every
+/// recognised `while` loop one iteration at a time, which is what
+/// drives the post-update `acc` variable emissions this test counts.
 #[test]
-#[ignore]
 fn test_loop_while_for_test_per_iteration_steps_pin() {
     let Some((doc, _)) = record_and_dump_full(
         "test_loop_while_for_test_per_iteration_steps_pin",
