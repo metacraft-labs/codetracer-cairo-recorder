@@ -34,6 +34,17 @@ pub struct CairoTracer {
     array_type_id: Option<codetracer_trace_types::TypeId>,
     /// Cairo tuple type id (registered lazily for compound Tuple values).
     tuple_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Per-user-struct type ids, keyed by bare struct name (e.g.
+    /// `"Point"`).  Registered lazily on first emission of a
+    /// `ValueRecord::Struct` so the trace's type table contains a
+    /// dedicated entry per source-declared struct type rather than a
+    /// single anonymous one.
+    struct_type_ids: std::collections::HashMap<String, codetracer_trace_types::TypeId>,
+    /// Shared `Variant` type id for `Option`/`Result`-shaped values.
+    /// The discriminator distinguishes individual cases on the
+    /// ValueRecord itself; the type id only needs to mark "this is a
+    /// tagged-union value".
+    variant_type_id: Option<codetracer_trace_types::TypeId>,
 }
 
 impl CairoTracer {
@@ -147,11 +158,32 @@ impl CairoTracer {
         let panic_message: Option<String> = match &result.value {
             RunResultValue::Panic(values) => {
                 let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-                Some(format!(
+                // Bug-fix (M10 panic_with_felt252_test): the raw felt list
+                // hides the human-readable `assert!` message that lives
+                // *inside* the panic payload.  Cairo encodes
+                // `panic_with_felt252("…")` / `assert!(cond, "…")` as a
+                // sequence of felts: a class-of-panic tag, an outer
+                // payload header, the message bytes packed into one or
+                // more felts (31 ASCII bytes per felt252), and a final
+                // byte-length felt.  We try to recover the message by
+                // walking each felt, converting it to its big-endian
+                // ASCII byte representation, and keeping the printable
+                // runs.  Pre-fix the message surfaced as a string of
+                // opaque integers; post-fix the recorder surfaces both
+                // the raw values (for debugging / golden snapshots) and
+                // the decoded message (for the event-log surface).
+                let decoded = decode_cairo_panic_message(values);
+                let prefix = format!(
                     "Cairo program panicked with {} value(s): [{}]",
                     values.len(),
                     parts.join(", ")
-                ))
+                );
+                let full = if decoded.is_empty() {
+                    prefix
+                } else {
+                    format!("{prefix} message=\"{decoded}\"")
+                };
+                Some(full)
             }
             RunResultValue::Success(_) => None,
         };
@@ -181,6 +213,8 @@ impl CairoTracer {
             felt_type_id: None,
             array_type_id: None,
             tuple_type_id: None,
+            struct_type_ids: std::collections::HashMap::new(),
+            variant_type_id: None,
         };
 
         // -- 6. Initialise output files -----------------------------------------------
@@ -369,8 +403,7 @@ impl CairoTracer {
         // decide whether a let-binding's variable should be emitted as a
         // step variable on its line.  (Step variables only fire when the
         // declaring function is the active DFS frame.)
-        let mut visited: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         if let Some(root_name) = root {
             self.emit_function_dfs(
@@ -440,11 +473,7 @@ impl CairoTracer {
                 continue;
             }
 
-            TraceWriter::register_step(
-                &mut *self.writer,
-                source_path,
-                Line(abs_line as i64),
-            );
+            TraceWriter::register_step(&mut *self.writer, source_path, Line(abs_line as i64));
 
             // Emit scalar variable values for any let-binding declared
             // on this line.  Values originate from `var_values`, which
@@ -553,19 +582,57 @@ impl CairoTracer {
         if let Some(id) = self.tuple_type_id {
             return id;
         }
-        let id = TraceWriter::ensure_type_id(
-            &mut *self.writer,
-            TypeKind::Tuple,
-            "(felt252, ...)",
-        );
+        let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Tuple, "(felt252, ...)");
         self.tuple_type_id = Some(id);
         id
     }
 
+    /// Lazily register a per-struct type id, keyed by Cairo struct name
+    /// (e.g. `"Point"`).  The Nim writer doesn't expose field-type
+    /// registration through `ensure_type_id` — the binary container
+    /// stores only the `(kind, lang_type)` pair — but the source-declared
+    /// `field_names` are still useful: we fold them into the rendered
+    /// `lang_type` (e.g. `"Point{x,y}"`) so the trace's type table
+    /// surfaces the field shape alongside the bare struct name.  The
+    /// Struct ValueRecord still carries positional `field_values`, which
+    /// downstream consumers zip against the `lang_type`'s `{...}` order.
+    fn ensure_struct_type_id(
+        &mut self,
+        name: &str,
+        field_names: &[String],
+    ) -> codetracer_trace_types::TypeId {
+        let lang_type = if field_names.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}{{{}}}", field_names.join(","))
+        };
+        if let Some(&id) = self.struct_type_ids.get(&lang_type) {
+            return id;
+        }
+        let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Struct, &lang_type);
+        self.struct_type_ids.insert(lang_type, id);
+        id
+    }
+
+    /// Lazily register a generic `Variant` type id for `Option`/`Result`
+    /// shaped values.  The discriminator lives on the ValueRecord itself,
+    /// so a single shared type id is sufficient for the heuristic — the
+    /// `lang_type` deliberately stays generic (`"Variant"`) to avoid
+    /// pretending we model the enum-payload type system.
+    fn ensure_variant_type_id(&mut self) -> codetracer_trace_types::TypeId {
+        if let Some(id) = self.variant_type_id {
+            return id;
+        }
+        let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Variant, "Variant");
+        self.variant_type_id = Some(id);
+        id
+    }
+
     /// Convert a parsed compound binding (Array literal sequence / tuple
-    /// literal initialiser) into the matching `ValueRecord`.  All element
-    /// felt literals are wrapped as `ValueRecord::Int` against the shared
-    /// `felt252` type id registered at trace start.
+    /// literal initialiser / struct literal / variant literal) into the
+    /// matching `ValueRecord`.  All element felt literals are wrapped as
+    /// `ValueRecord::Int` against the shared `felt252` type id registered
+    /// at trace start.
     fn compound_to_value_record(&mut self, binding: &CompoundBinding) -> ValueRecord {
         let felt_type_id = self.felt_type_id.expect("felt type id registered");
         let elements: Vec<ValueRecord> = binding
@@ -586,6 +653,38 @@ impl CairoTracer {
                 elements,
                 type_id: self.ensure_tuple_type_id(),
             },
+            CompoundKind::Struct => {
+                let type_id = self.ensure_struct_type_id(&binding.type_name, &binding.field_names);
+                ValueRecord::Struct {
+                    field_values: elements,
+                    type_id,
+                }
+            }
+            CompoundKind::Variant => {
+                // The `Variant` ValueRecord holds a single boxed
+                // `contents`.  For `None` we synthesise a `NONE_VALUE`
+                // tag (the discriminator alone is enough for the consumer
+                // to distinguish None from Some(x)).  For `Some(x)` /
+                // `Ok(x)` / `Err(x)` we wrap the single payload felt as
+                // an `Int` ValueRecord directly — Cairo's payload-of-one
+                // case doesn't need a synthetic enclosing Tuple/Struct.
+                let type_id = self.ensure_variant_type_id();
+                let contents: ValueRecord = if elements.is_empty() {
+                    NONE_VALUE
+                } else if elements.len() == 1 {
+                    elements.into_iter().next().unwrap()
+                } else {
+                    ValueRecord::Tuple {
+                        elements,
+                        type_id: self.ensure_tuple_type_id(),
+                    }
+                };
+                ValueRecord::Variant {
+                    discriminator: binding.type_name.clone(),
+                    contents: Box::new(contents),
+                    type_id,
+                }
+            }
         }
     }
 }
@@ -648,12 +747,31 @@ struct CompoundBinding {
     emit_line: u32,
     kind: CompoundKind,
     elements: Vec<i64>,
+    /// Optional shape data for typed compound bindings.
+    ///
+    /// * For `CompoundKind::Struct` this is the Cairo struct name (e.g.
+    ///   `"Point"`) used both to register the per-struct `type_id` and
+    ///   to render the `lang_type` field in `ct-print --full`.  The
+    ///   `field_names` carry the source-declared field order — the
+    ///   matching values live in `elements`.
+    /// * For `CompoundKind::Variant` this is the variant discriminator
+    ///   (e.g. `"Some"`, `"None"`, `"Ok"`, `"Err"`).  `elements` carries
+    ///   the payload values (empty for `None`).
+    type_name: String,
+    field_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum CompoundKind {
     Array,
     Tuple,
+    /// User-defined struct literal — `Point { x: 3, y: 4 }`.  See the
+    /// note on `CompoundBinding` for the field-shape carrier.
+    Struct,
+    /// Enum variant — `Option::Some(7)`, `Result::Ok(11)`, etc.  The
+    /// discriminator lives in `type_name` and the payload felts in
+    /// `elements`.
+    Variant,
 }
 
 /// Recover compound (Array / Tuple) let-bindings from the Cairo source.
@@ -697,14 +815,15 @@ fn parse_compound_bindings(source: &str) -> Vec<CompoundBinding> {
 
             // ----- Array<...> = ArrayTrait::new(); -------------------
             if let Some(name) = parse_mut_array_decl(trimmed) {
-                let (emit_line, elements) =
-                    collect_array_appends(&lines, k + 1, fn_end, &name);
+                let (emit_line, elements) = collect_array_appends(&lines, k + 1, fn_end, &name);
                 if !elements.is_empty() {
                     out.push(CompoundBinding {
                         name,
                         emit_line,
                         kind: CompoundKind::Array,
                         elements,
+                        type_name: String::new(),
+                        field_names: Vec::new(),
                     });
                 }
                 continue;
@@ -717,6 +836,38 @@ fn parse_compound_bindings(source: &str) -> Vec<CompoundBinding> {
                     emit_line: (k + 1) as u32,
                     kind: CompoundKind::Tuple,
                     elements,
+                    type_name: String::new(),
+                    field_names: Vec::new(),
+                });
+                continue;
+            }
+
+            // ----- let <name>: TypeName = TypeName { field: lit, ... };
+            //       — user-defined struct literal initialiser.
+            if let Some((name, struct_name, field_names, elements)) =
+                parse_struct_literal_decl(trimmed)
+            {
+                out.push(CompoundBinding {
+                    name,
+                    emit_line: (k + 1) as u32,
+                    kind: CompoundKind::Struct,
+                    elements,
+                    type_name: struct_name,
+                    field_names,
+                });
+                continue;
+            }
+
+            // ----- let <name>: <T> = Option::Some(lit) / Option::None /
+            //       Result::Ok(lit) / Result::Err(lit); — Variant literal.
+            if let Some((name, discriminator, elements)) = parse_variant_literal_decl(trimmed) {
+                out.push(CompoundBinding {
+                    name,
+                    emit_line: (k + 1) as u32,
+                    kind: CompoundKind::Variant,
+                    elements,
+                    type_name: discriminator,
+                    field_names: Vec::new(),
                 });
                 continue;
             }
@@ -724,6 +875,137 @@ fn parse_compound_bindings(source: &str) -> Vec<CompoundBinding> {
     }
 
     out
+}
+
+/// Match `let <name>[: <Type>] = <StructName> { <field>: <lit>, ... };` and
+/// return `(name, struct_name, field_names, elements)`.
+///
+/// Cairo lets users initialise structs with the `TypeName { field: value,
+/// ... }` syntax.  We recognise the literal-only form (every field
+/// receives an integer literal) so the recorder can emit a
+/// `ValueRecord::Struct` with positional `field_values` matching the
+/// source-declared field order.  Anything more elaborate (computed
+/// fields, shorthand `Point { x, y }`, nested structs) falls through to
+/// the scalar binding path.
+fn parse_struct_literal_decl(line: &str) -> Option<(String, String, Vec<String>, Vec<i64>)> {
+    let rest = line.strip_prefix("let ")?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+    let name = if let Some(colon) = lhs.find(':') {
+        lhs[..colon].trim_start_matches("mut ").trim()
+    } else {
+        lhs.trim_start_matches("mut ").trim()
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // Find the `{ ... }` body.
+    let brace_open = rhs.find('{')?;
+    let brace_close = rhs.rfind('}')?;
+    if brace_close <= brace_open {
+        return None;
+    }
+    let struct_name = rhs[..brace_open].trim().to_string();
+    if struct_name.is_empty()
+        || !struct_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+    {
+        return None;
+    }
+    // Last `::<Name>` segment is the discriminator — for plain struct
+    // literals (`Point { ... }`) this collapses to `Point` itself.
+    let bare_struct = struct_name
+        .rsplit("::")
+        .next()
+        .unwrap_or(&struct_name)
+        .to_string();
+
+    let body = rhs[brace_open + 1..brace_close].trim();
+    let mut field_names = Vec::new();
+    let mut elements = Vec::new();
+    for part in body.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let colon = part.find(':')?;
+        let field = part[..colon].trim().to_string();
+        let val = part[colon + 1..].trim();
+        let v = val.parse::<i64>().ok()?;
+        field_names.push(field);
+        elements.push(v);
+    }
+    if field_names.is_empty() {
+        return None;
+    }
+
+    Some((name.to_string(), bare_struct, field_names, elements))
+}
+
+/// Match `let <name>[: <Type>] = Option::Some(<lit>)` /
+/// `Option::None` / `Result::Ok(<lit>)` / `Result::Err(<lit>)` and
+/// return `(name, discriminator, elements)`.
+///
+/// The `discriminator` is the bare-variant name (`"Some"`, `"None"`,
+/// `"Ok"`, `"Err"`) without the enum prefix — matches the
+/// `ValueRecord::Variant.discriminator` shape so ct-print surfaces a
+/// clean tag.  `elements` is empty for `None` and holds the single
+/// payload felt for the others.  Multi-payload variants fall through.
+fn parse_variant_literal_decl(line: &str) -> Option<(String, String, Vec<i64>)> {
+    let rest = line.strip_prefix("let ")?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+    let name = if let Some(colon) = lhs.find(':') {
+        lhs[..colon].trim_start_matches("mut ").trim()
+    } else {
+        lhs.trim_start_matches("mut ").trim()
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // Recognised prefixes — keep the list tight so we don't accidentally
+    // shadow a bare-call (`Foo(x)`) that the let-callee path already
+    // claims for return-value propagation.
+    let known: &[(&str, bool)] = &[
+        ("Option::Some(", true),
+        ("Option::None", false),
+        ("Result::Ok(", true),
+        ("Result::Err(", true),
+    ];
+    for (prefix, has_payload) in known {
+        if !rhs.starts_with(prefix) {
+            continue;
+        }
+        let bare = prefix
+            .trim_end_matches('(')
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if !has_payload {
+            return Some((name.to_string(), bare, Vec::new()));
+        }
+        // Find matching `)` and parse a single integer literal payload.
+        let inside = &rhs[prefix.len()..];
+        let close = inside.find(')')?;
+        let lit = inside[..close].trim();
+        let v = lit.parse::<i64>().ok()?;
+        return Some((name.to_string(), bare, vec![v]));
+    }
+    None
 }
 
 /// Return inclusive (start, end) 0-based line index ranges for every
@@ -787,12 +1069,7 @@ fn parse_mut_array_decl(line: &str) -> Option<String> {
 /// line, literal values) pair.  Stops at the first non-append statement
 /// that mentions the name (e.g. the line that finally consumes the
 /// array) or at the end of the function body.
-fn collect_array_appends(
-    lines: &[&str],
-    start: usize,
-    end: usize,
-    name: &str,
-) -> (u32, Vec<i64>) {
+fn collect_array_appends(lines: &[&str], start: usize, end: usize, name: &str) -> (u32, Vec<i64>) {
     let mut elements = Vec::new();
     let mut last_append_line = 0u32;
     let append_prefix = format!("{name}.append(");
@@ -922,24 +1199,21 @@ fn parse_callees_in_line(line: &str, user_functions: &[&str]) -> Vec<String> {
         if c.is_ascii_alphabetic() || c == b'_' {
             // Greedily consume an identifier.
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let ident = &trimmed[start..i];
             // Skip leading `::` that would make this a path component
             // rather than a bare function call (`ArrayTrait::new` —
             // `new` would otherwise look like a call).
-            let preceded_by_path =
-                start >= 2 && &trimmed[start - 2..start] == "::";
+            let preceded_by_path = start >= 2 && &trimmed[start - 2..start] == "::";
             // Must be followed by `(` to count as a call.
             if !preceded_by_path
                 && i < bytes.len()
                 && bytes[i] == b'('
-                && user_functions.iter().any(|f| {
-                    f == &ident || f.ends_with(&format!("::{}", ident))
-                })
+                && user_functions
+                    .iter()
+                    .any(|f| f == &ident || f.ends_with(&format!("::{}", ident)))
             {
                 out.push(ident.to_string());
             }
@@ -979,8 +1253,7 @@ fn compute_function_return_values(
     var_values: &std::collections::HashMap<String, i64>,
     panicked: bool,
 ) -> std::collections::HashMap<String, Option<i64>> {
-    let mut out: std::collections::HashMap<String, Option<i64>> =
-        std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<String, Option<i64>> = std::collections::HashMap::new();
 
     // Per-binding → callee map for every function body.  Cleaner than
     // re-parsing inside the propagation loop, and the syntactic shape
@@ -1119,10 +1392,7 @@ fn parse_single_call(expr: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return None;
     }
     Some(name.to_string())
@@ -1329,6 +1599,105 @@ fn find_corelib_path() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Recover a Cairo panic's human-readable message by walking the raw
+/// felt252 panic-payload vector returned from
+/// `RunResultValue::Panic(values)`.
+///
+/// Cairo's `panic_with_felt252("…")` / `assert!(cond, "…")` encoding
+/// packs the message into one or more felt252 elements (31 ASCII bytes
+/// per felt, big-endian).  The exact framing varies — a typical encoding
+/// is `[panic_tag, payload_header, message_felt, length]` for short
+/// messages and similar for longer ones — so we try each felt
+/// independently, keep the printable-ASCII runs, and join them into a
+/// single decoded message string.
+///
+/// Returns an empty string when no felt decodes to a useful run of
+/// printable bytes (typical of non-`assert!` panics that carry numeric
+/// codes only).
+fn decode_cairo_panic_message<T: std::fmt::Display>(values: &[T]) -> String {
+    // The real type held inside `RunResultValue::Panic` is
+    // `Vec<Felt252>` re-exported via `cairo_lang_runner`.  We capture
+    // it as a generic slice of `Display`-able values to avoid coupling
+    // the helper to that exact path (the import lives at the trace_program
+    // call site).  In practice every element implements `to_string()`
+    // returning a decimal felt — that's all we need to recover the bytes.
+    let mut parts: Vec<String> = Vec::new();
+    for v in values {
+        let dec = v.to_string();
+        // Skip obviously-non-message integers (0 / tiny lengths) so
+        // they don't pollute the decoded text.
+        if dec.len() < 6 {
+            continue;
+        }
+        // Re-parse the decimal felt as an unsigned big-int and recover
+        // the trailing printable bytes.  We don't have num_bigint here,
+        // so do the conversion by stripping one byte at a time via
+        // division-by-256.  Felts can be up to 252 bits (~32 bytes); the
+        // 31-byte cap below matches Cairo's per-felt ASCII packing.
+        let bytes = felt_decimal_to_bytes(&dec, 31);
+        let ascii = bytes_to_printable_run(&bytes);
+        if ascii.len() >= 4 {
+            parts.push(ascii);
+        }
+    }
+    parts.join(" ")
+}
+
+/// Decode a decimal-string felt into a big-endian byte vector of at
+/// most `max_len` bytes.  Used only by `decode_cairo_panic_message` to
+/// recover ASCII payloads packed into felt252 values — see the
+/// per-felt 31-byte ASCII packing convention in
+/// `corelib::byte_array`.
+fn felt_decimal_to_bytes(dec: &str, max_len: usize) -> Vec<u8> {
+    // We implement big-int / 256 in-place on a digit buffer because
+    // pulling in `num_bigint` for this tiny helper would balloon the
+    // recorder's dependency closure.  The arithmetic stays linear in
+    // `dec.len()` per division, which is fine for the at-most-32-byte
+    // felts we deal with.
+    let mut digits: Vec<u8> = dec.bytes().map(|b| b.wrapping_sub(b'0')).collect();
+    let mut out: Vec<u8> = Vec::new();
+    while out.len() < max_len {
+        let mut carry: u32 = 0;
+        let mut all_zero = true;
+        for d in digits.iter_mut() {
+            let cur = carry * 10 + *d as u32;
+            *d = (cur / 256) as u8;
+            carry = cur % 256;
+            if *d != 0 {
+                all_zero = false;
+            }
+        }
+        out.push(carry as u8);
+        if all_zero {
+            break;
+        }
+    }
+    out.reverse();
+    out
+}
+
+/// Filter a byte vector down to its longest run of printable-ASCII
+/// bytes (space through `~`).  Used to extract human-readable message
+/// fragments from felt252-packed panic payloads.
+fn bytes_to_printable_run(bytes: &[u8]) -> String {
+    let mut best = String::new();
+    let mut cur = String::new();
+    for &b in bytes {
+        if (0x20..=0x7e).contains(&b) {
+            cur.push(b as char);
+        } else {
+            if cur.len() > best.len() {
+                best = cur.clone();
+            }
+            cur.clear();
+        }
+    }
+    if cur.len() > best.len() {
+        best = cur;
+    }
+    best.trim().to_string()
 }
 
 /// Extract function name from a line like "fn compute() -> felt252 {"

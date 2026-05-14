@@ -448,9 +448,7 @@ fn test_recorded_trace_via_ct_print_json() {
     ];
     for (name, value) in expected {
         assert!(
-            observed_vars
-                .iter()
-                .any(|(n, v)| n == name && v == value),
+            observed_vars.iter().any(|(n, v)| n == name && v == value),
             "expected step variable `{name}` = {value} in --full output; \
              observed = {observed_vars:?}"
         );
@@ -618,10 +616,7 @@ fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
 /// caller can match `metadata.program`).  Returns `None` when
 /// `ct-print` is unavailable (the caller has already emitted a
 /// `SKIP:` line via `ct_print_or_skip`).
-fn record_and_dump_full(
-    test_name: &str,
-    program: &str,
-) -> Option<(serde_json::Value, PathBuf)> {
+fn record_and_dump_full(test_name: &str, program: &str) -> Option<(serde_json::Value, PathBuf)> {
     let ct_print = ct_print_or_skip(test_name)?;
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
@@ -651,8 +646,8 @@ fn record_and_dump_full(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let doc: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .expect("ct-print --full should emit valid JSON");
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full should emit valid JSON");
 
     // Preserve the temp dir until after the JSON is parsed, then drop.
     drop(tmp_dir);
@@ -688,9 +683,9 @@ fn observed_var_sequence(doc: &serde_json::Value) -> Vec<(String, i64)> {
                 name,
                 value
             );
-            let i = value["i"].as_i64().unwrap_or_else(|| {
-                panic!("Int.i must be i64 for `{name}`; got {value}")
-            });
+            let i = value["i"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("Int.i must be i64 for `{name}`; got {value}"));
             out.push((name, i));
         }
     }
@@ -732,9 +727,9 @@ fn observed_var_sequence_filtered(
                 name,
                 value
             );
-            let i = value["i"].as_i64().unwrap_or_else(|| {
-                panic!("Int.i must be i64 for `{name}`; got {value}")
-            });
+            let i = value["i"]
+                .as_i64()
+                .unwrap_or_else(|| panic!("Int.i must be i64 for `{name}`; got {value}"));
             out.push((name, i));
         }
     }
@@ -849,10 +844,7 @@ fn assert_step_indices_monotonic(doc: &serde_json::Value) {
 }
 
 /// Assert `metadata.program` ends with the expected source filename.
-fn assert_metadata_program_ends_with(
-    doc: &serde_json::Value,
-    source_path: &std::path::Path,
-) {
+fn assert_metadata_program_ends_with(doc: &serde_json::Value, source_path: &std::path::Path) {
     let prog = doc["metadata"]["program"]
         .as_str()
         .expect("metadata.program str");
@@ -995,11 +987,12 @@ fn test_control_flow_test_via_ct_print_full() {
                 .next()
                 .expect("non-empty function name")
                 .to_string();
-            let i = e["return_value"]["i"]
-                .as_i64()
-                .unwrap_or_else(|| {
-                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
-                });
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
             (name, i)
         })
         .collect();
@@ -1168,11 +1161,12 @@ fn test_nested_calls_test_via_ct_print_full() {
                 .next()
                 .expect("non-empty function name")
                 .to_string();
-            let i = e["return_value"]["i"]
-                .as_i64()
-                .unwrap_or_else(|| {
-                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
-                });
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
             (name, i)
         })
         .collect();
@@ -1282,10 +1276,7 @@ fn test_collections_test_via_ct_print_full() {
         .collect();
     // Function table follows DFS visit order (bug-fix 1+2): main →
     // compute → array_total (called first in compute) → pair_sum.
-    assert_eq!(
-        bare_fns,
-        vec!["main", "compute", "array_total", "pair_sum"]
-    );
+    assert_eq!(bare_fns, vec!["main", "compute", "array_total", "pair_sum"]);
 
     // ----- counts -----------------------------------------------------
     // 20 steps: array_total(8) + pair_sum(4) + compute(5) + main(2)
@@ -1343,11 +1334,12 @@ fn test_collections_test_via_ct_print_full() {
                 .next()
                 .expect("non-empty function name")
                 .to_string();
-            let i = e["return_value"]["i"]
-                .as_i64()
-                .unwrap_or_else(|| {
-                    panic!("call_exit.return_value must be Int; got {}", e["return_value"])
-                });
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
             (name, i)
         })
         .collect();
@@ -1414,7 +1406,11 @@ fn test_collections_test_via_ct_print_full() {
         .expect("pair.elements")
         .iter()
         .map(|e| {
-            assert_eq!(e["kind"].as_str(), Some("Int"), "pair element should be Int");
+            assert_eq!(
+                e["kind"].as_str(),
+                Some("Int"),
+                "pair element should be Int"
+            );
             e["i"].as_i64().expect("pair element i")
         })
         .collect();
@@ -1558,10 +1554,7 @@ fn test_error_paths_test_via_ct_print_full() {
     }
 
     // ----- The panic event -------------------------------------------
-    let io_events: Vec<&serde_json::Value> = events
-        .iter()
-        .filter(|e| e["kind"] == "io")
-        .collect();
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
     assert_eq!(io_events.len(), 1, "expected exactly one io event");
     let panic_ev = io_events[0];
     assert_eq!(
@@ -1584,12 +1577,7 @@ fn test_error_paths_test_via_ct_print_full() {
     // RHS panicked so it's omitted from the trace, and the synthetic
     // trailing `return_value` is omitted because the panic prevented
     // `main` from producing a value.
-    assert_eq!(
-        observed_var_sequence(&doc),
-        vec![
-            ("a".to_string(), 10),
-        ]
-    );
+    assert_eq!(observed_var_sequence(&doc), vec![("a".to_string(), 10),]);
 }
 
 /// Regression pin for bug-fix 4: when a Cairo program panics, source-
@@ -1609,5 +1597,719 @@ fn test_error_paths_test_let_bindings_keep_source_values() {
         observed.iter().any(|(n, v)| n == "a" && *v == 10),
         "expected `a` = 10 in trace (the value bound before the panic); \
          observed = {observed:?}"
+    );
+}
+
+// ===========================================================================
+// M10 fixtures — ValueRecord variants that close the M9 known-limitation
+// list (Struct / Variant / Storage / felt-decoded-panic / loop-step).
+// ===========================================================================
+//
+// Each fixture pins one of the top-five idiomatic-Cairo shapes the M9
+// recorder did not yet emit:
+//
+// 1. `struct_test.cairo`        — first user-defined-Struct emission.
+// 2. `result_option_test.cairo` — first `ValueRecord::Variant` emission
+//    for `Option::Some`/`None` and `Result::Ok`/`Err`.
+// 3. `storage_test`             — StarkNet contract pin via the
+//    `write_starknet_trace` snforge-converter path; the Cairo source
+//    sits in `cairo/storage_test.cairo` for documentation, but the
+//    canonical CTFS bundle is produced from the matching
+//    `starknet/storage_test_trace.json` snforge fixture.
+// 4. `panic_with_felt252_test`  — felt-decoded `assert!` message in the
+//    `register_special_event(EventLogKind::Error, "CairoPanic", ...)`
+//    payload (closes the M9 deferred
+//    `test_error_paths_test_let_bindings_keep_source_values`).
+// 5. `loop_while_for_test`      — locks today's per-source-line stepping
+//    for `while` loops (one step per body line, regardless of iteration
+//    count) and pairs with an `#[ignore]`'d sibling pin asserting the
+//    spec-correct per-iteration shape.
+
+// --- struct_test.cairo -----------------------------------------------------
+
+/// Records `struct_test.cairo` and asserts on the **exact** event shape.
+///
+/// The program defines a `Point { x: felt252, y: felt252 }` struct and
+/// initialises it with two literal Point values inside `compute()`.  The
+/// recorder must:
+///
+/// * register a dedicated `Struct`-kinded type id keyed by the bare
+///   struct name (`"Point"`).
+/// * emit a `ValueRecord::Struct { field_values, type_id }` step
+///   variable for each `let <name>: Point = Point { x: lit, y: lit };`,
+///   with `field_values` holding two `Int` ValueRecords in source-
+///   declared field order.
+/// * keep the existing scalar (`Int`) emission for `total` and the
+///   trailing synthetic `return_value`.
+#[test]
+fn test_struct_test_via_ct_print_full() {
+    let Some((doc, source_path)) =
+        record_and_dump_full("test_struct_test_via_ct_print_full", "struct_test.cairo")
+    else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // Function table: DFS visit order from main.
+    assert_eq!(bare_fns, vec!["main", "compute"]);
+
+    // ----- Type table — the per-struct lang_type must appear ----------
+    // The recorder lazily registers a `Struct`-kinded type with a
+    // `lang_type` of the form `"Point{x,y}"` the first time a struct
+    // literal is emitted: the bare struct name is followed by the
+    // source-declared field-name shape so downstream consumers can zip
+    // the positional `field_values` against the named fields without
+    // re-parsing the Cairo source.  ct-print --full surfaces the
+    // registered lang_type in the trace's `types` array.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        types.iter().any(|t| *t == "Point{x,y}"),
+        "expected `Point{{x,y}}` lang_type in types table; got {:?}",
+        types
+    );
+
+    // ----- counts -----------------------------------------------------
+    // 8 steps: main(2) + compute(5) + 1 trailing return_value step.
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
+    assert_eq!(events.len(), 12, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    // ----- Call sequence + LIFO exit ---------------------------------
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "compute".to_string()]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["compute".to_string(), "main".to_string()]
+    );
+
+    // ----- Decoded value kinds ---------------------------------------
+    // Sequence: origin (Struct), shift (Struct), total (Int), then the
+    // synthetic trailing `return_value` (Int) attached to main's last
+    // body line.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("origin".to_string(), "Struct".to_string()),
+            ("shift".to_string(), "Struct".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Strict struct-shape assertions ----------------------------
+    // Each `Point` struct literal surfaces as a `ValueRecord::Struct`
+    // whose `field_values` array carries the two felt literals in
+    // source-declared field order (`x`, then `y`).
+    let origin_value = find_var_value(&doc, "origin").expect("origin step variable");
+    assert_eq!(origin_value["kind"].as_str(), Some("Struct"));
+    let origin_fields: Vec<i64> = origin_value["field_values"]
+        .as_array()
+        .expect("origin.field_values")
+        .iter()
+        .map(|e| {
+            assert_eq!(
+                e["kind"].as_str(),
+                Some("Int"),
+                "origin field should be Int"
+            );
+            e["i"].as_i64().expect("origin field i")
+        })
+        .collect();
+    assert_eq!(origin_fields, vec![3, 4]);
+
+    let shift_value = find_var_value(&doc, "shift").expect("shift step variable");
+    assert_eq!(shift_value["kind"].as_str(), Some("Struct"));
+    let shift_fields: Vec<i64> = shift_value["field_values"]
+        .as_array()
+        .expect("shift.field_values")
+        .iter()
+        .map(|e| e["i"].as_i64().expect("shift field i"))
+        .collect();
+    assert_eq!(shift_fields, vec![10, 20]);
+
+    // ----- Scalar (Int) emissions -------------------------------------
+    let scalar_only = observed_var_sequence_filtered(&doc, &["origin", "shift"]);
+    assert_eq!(
+        scalar_only,
+        vec![("total".to_string(), 37), ("return_value".to_string(), 37),]
+    );
+
+    // ----- Per-callee return values (bug-fix 3 carryover) -------------
+    // compute() returns total = 3+4+10+20 = 37.  main() delegates so
+    // surfaces 37 as well.
+    let exit_returns: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![("compute".to_string(), 37), ("main".to_string(), 37),]
+    );
+}
+
+// --- result_option_test.cairo ---------------------------------------------
+
+/// Records `result_option_test.cairo` and asserts on the **exact**
+/// event shape.  The fixture lives entirely inside `compute()`:
+///
+/// ```cairo
+/// let opt_some: Option<felt252> = Option::Some(7);
+/// let opt_none: Option<felt252> = Option::None;
+/// let res_ok:  Result<felt252, felt252> = Result::Ok(11);
+/// let res_err: Result<felt252, felt252> = Result::Err(5);
+/// ```
+///
+/// The recorder must surface each binding as a `ValueRecord::Variant`
+/// whose `discriminator` field carries the bare variant name
+/// (`"Some"` / `"None"` / `"Ok"` / `"Err"`) and whose `contents`
+/// box carries the payload felt (or a `None` ValueRecord for
+/// `Option::None`).
+#[test]
+fn test_result_option_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_result_option_test_via_ct_print_full",
+        "result_option_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "compute"]);
+
+    // ----- counts -----------------------------------------------------
+    // main(2) + compute(8) + 1 trailing = 11 step events; 2 calls.
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 11 steps + 2 call_entry + 2 call_exit = 15 events.
+    assert_eq!(events.len(), 15, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "compute".to_string()]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["compute".to_string(), "main".to_string()]
+    );
+
+    // ----- Decoded value kinds ---------------------------------------
+    // Each Option/Result let-binding fires as a `Variant`; `total` and
+    // the synthetic trailing `return_value` are still `Int`.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("opt_some".to_string(), "Variant".to_string()),
+            ("opt_none".to_string(), "Variant".to_string()),
+            ("res_ok".to_string(), "Variant".to_string()),
+            ("res_err".to_string(), "Variant".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Strict variant-shape assertions ---------------------------
+    let opt_some = find_var_value(&doc, "opt_some").expect("opt_some var");
+    assert_eq!(opt_some["kind"].as_str(), Some("Variant"));
+    assert_eq!(opt_some["discriminator"].as_str(), Some("Some"));
+    assert_eq!(opt_some["contents"]["kind"].as_str(), Some("Int"));
+    assert_eq!(opt_some["contents"]["i"].as_i64(), Some(7));
+
+    let opt_none = find_var_value(&doc, "opt_none").expect("opt_none var");
+    assert_eq!(opt_none["kind"].as_str(), Some("Variant"));
+    assert_eq!(opt_none["discriminator"].as_str(), Some("None"));
+    // The recorder emits `NONE_VALUE` for empty-payload variants, which
+    // ct-print --full surfaces with `kind = "None"`.
+    assert_eq!(opt_none["contents"]["kind"].as_str(), Some("None"));
+
+    let res_ok = find_var_value(&doc, "res_ok").expect("res_ok var");
+    assert_eq!(res_ok["kind"].as_str(), Some("Variant"));
+    assert_eq!(res_ok["discriminator"].as_str(), Some("Ok"));
+    assert_eq!(res_ok["contents"]["i"].as_i64(), Some(11));
+
+    let res_err = find_var_value(&doc, "res_err").expect("res_err var");
+    assert_eq!(res_err["kind"].as_str(), Some("Variant"));
+    assert_eq!(res_err["discriminator"].as_str(), Some("Err"));
+    assert_eq!(res_err["contents"]["i"].as_i64(), Some(5));
+}
+
+// --- panic_with_felt252_test.cairo ----------------------------------------
+
+/// Records `panic_with_felt252_test.cairo`.  The program calls
+/// `require_positive(0)` which trips an `assert!(_, "value was zero")`
+/// macro and panics.  Pre-M10 the recorder surfaced the panic only as
+/// the raw decimal felt vector — the human-readable `"value was zero"`
+/// message was lost.  Post-M10 the recorder additionally felt-decodes
+/// every panic-payload value and appends the recovered ASCII run to
+/// the `register_special_event` `text` field.
+///
+/// This test pins:
+///
+/// * the function table (DFS order from main).
+/// * the io_event count + tag (one `ioError`).
+/// * the literal substring `value was zero` inside the panic event's
+///   `text` (the felt-decoded message).
+#[test]
+fn test_panic_with_felt252_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_panic_with_felt252_test_via_ct_print_full",
+        "panic_with_felt252_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "compute", "require_positive"]);
+
+    // ----- counts -----------------------------------------------------
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "compute".to_string(),
+            "require_positive".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "require_positive".to_string(),
+            "compute".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // ----- The panic event surfaces both the raw felt list and the
+    //       felt-decoded message ------------------------------------------
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 1, "expected exactly one io event");
+    let panic_ev = io_events[0];
+    assert_eq!(
+        panic_ev["io_kind"].as_str(),
+        Some("ioError"),
+        "panic event must be tagged ioError; got {panic_ev}"
+    );
+    let text = panic_ev["text"].as_str().expect("io.text str");
+    assert!(
+        text.contains("Cairo program panicked"),
+        "panic text must mention the panic; got {text}"
+    );
+    // M10 fix: the assert! message is felt-decoded back to ASCII and
+    // appended to the event text.  Pre-fix the message lived only in
+    // the raw felt encoding and was effectively unreadable in the
+    // event-log pane.
+    assert!(
+        text.contains("value was zero"),
+        "panic text should include the felt-decoded `assert!` message \
+         `value was zero`; got {text}"
+    );
+    assert!(
+        text.contains("message="),
+        "panic text should tag the decoded message with `message=`; got {text}"
+    );
+
+    // ----- The let-binding `a` keeps its source-evaluated value
+    //       (closes the M9 deferred test_error_paths_..._keep_source_values
+    //       pin: `a` here is `let a: felt252 = 7;`, so the recorder must
+    //       surface `a = 7` even though the panic in `require_positive`
+    //       prevents any VM-side `Success` payload). -----------------------
+    let observed = observed_var_sequence(&doc);
+    assert_eq!(
+        observed,
+        vec![("a".to_string(), 7),],
+        "expected only `a = 7` to surface; observed = {observed:?}"
+    );
+}
+
+// --- loop_while_for_test.cairo --------------------------------------------
+
+/// Records `loop_while_for_test.cairo` and pins the **current**
+/// per-source-line stepping behaviour for `while` loops: each line of
+/// the loop body fires exactly one step regardless of iteration
+/// count.  See the sibling `#[ignore]`d
+/// `test_loop_while_for_test_per_iteration_steps_pin` for the
+/// spec-correct expectation (one step per loop iteration).  Once the
+/// recorder grows backward-jump detection, that pin will move from
+/// `#[ignore]` to live, and this test's step / event counts will need
+/// to be relaxed accordingly.
+#[test]
+fn test_loop_while_for_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_loop_while_for_test_via_ct_print_full",
+        "loop_while_for_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(
+        bare_fns,
+        vec!["main", "compute", "loop_three", "loop_double"]
+    );
+
+    // ----- counts -----------------------------------------------------
+    // The static-DFS walker emits one step per non-empty / non-brace
+    // source line.  loop_three / loop_double bodies span 9 lines each,
+    // compute spans 7, main spans 3, plus the trailing return_value
+    // step gives 24 steps total (no per-iteration loop expansion).
+    let counts = &doc["counts"];
+    assert_eq!(counts["steps"].as_u64(), Some(24), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 24 steps + 4 call_entry + 4 call_exit = 32 events.
+    assert_eq!(events.len(), 32, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    // ----- Call sequence + LIFO exit ---------------------------------
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "compute".to_string(),
+            "loop_three".to_string(),
+            "loop_double".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "loop_three".to_string(),
+            "loop_double".to_string(),
+            "compute".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // ----- Decoded variable values ------------------------------------
+    // Today's heuristic emits no scalar values for the loop fixture: the
+    // VM-known return value (23) is mapped onto whichever body's tail
+    // expression matches the longest tuple/bare-ident shape across all
+    // functions, and `compute()`'s tail (`total`) is the canonical bare
+    // ident — but `total` lives only in `compute`, so its value never
+    // surfaces as a step variable.  This matches the M9 known
+    // limitation.  The sibling `#[ignore]`'d test pins the spec-correct
+    // expectation (per-iteration `acc` updates).
+    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+}
+
+/// `#[ignore]`'d sibling pin for the loop-step expectation: the
+/// recorder should emit one step event for every executed iteration of
+/// each `while` loop, with the loop-counter and accumulator surfacing
+/// their per-iteration values.  Today the static-DFS walker emits one
+/// step per source line (regardless of execution count); fulfilling
+/// this pin requires backward-jump detection in the Sierra walker or
+/// fixture-time loop unrolling.  See M10 in
+/// `metacraft-specs/Cairo-StarkNet.status.org`.
+#[test]
+#[ignore]
+fn test_loop_while_for_test_per_iteration_steps_pin() {
+    let Some((doc, _)) = record_and_dump_full(
+        "test_loop_while_for_test_per_iteration_steps_pin",
+        "loop_while_for_test.cairo",
+    ) else {
+        return;
+    };
+
+    // loop_three iterates 3 times, loop_double 2 times.  Each body
+    // contributes 2 mutating lines (`acc = acc + N`, `i = i + 1`) so
+    // a per-iteration emission would surface 3*2 + 2*2 = 10 mutation
+    // steps inside the loops alone.  The exact number depends on how
+    // the iteration boundary is modelled — this is a spec pin, not a
+    // recorder mirror.
+    let observed = observed_var_kinds(&doc);
+    let acc_count = observed.iter().filter(|(n, _)| n == "acc").count();
+    assert!(
+        acc_count >= 5,
+        "expected `acc` to surface at least once per loop iteration \
+         (3 + 2 = 5 minimum); observed acc emissions = {acc_count}"
+    );
+}
+
+// --- storage_test (snforge-converter path) --------------------------------
+
+/// Records the storage_test snforge JSON fixture through
+/// `starknet::write_starknet_trace` and asserts that the produced
+/// `.ct` container surfaces the expected `storage_read` / `storage_write`
+/// call frames in dynamic order.  This pins the M4 SnforgeTrace parsing
+/// → CTFS conversion path as a universal-test-level invariant: any
+/// future regression that drops, reorders, or relabels the storage
+/// op events will fail this test.
+///
+/// The fixture's matching Cairo source lives at
+/// `test-programs/cairo/storage_test.cairo` for documentation but is
+/// not compiled by the recorder (it has no `fn main` and the
+/// `#[starknet::contract]` dispatcher requires a separate runtime that
+/// the in-process Sierra runner does not provide).
+#[test]
+fn test_storage_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_storage_test_via_ct_print_full") else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("storage_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse storage_test snforge trace");
+
+    // Sanity-check the parsed entry shape so a regression in the JSON
+    // schema parser fails here loudly rather than via the downstream
+    // CTFS comparison.
+    assert_eq!(entries.len(), 5, "expected 5 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // ----- Function table — one entry per registered call frame -------
+    // The snforge converter emits `<contract>::<selector>` /
+    // `<contract>::storage_read` / `<contract>::storage_write` named
+    // call frames in dynamic order.  Function ids are assigned at
+    // first-emission time so the table reflects the same dynamic order
+    // as the call_entry sequence below.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // The exact dedup behaviour of `ensure_function_id` keeps each
+    // distinct name once.  For this fixture the deduped set is
+    // [increment, storage_read, storage_write, get].
+    let bare_fns: Vec<String> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        bare_fns,
+        vec![
+            "increment".to_string(),
+            "storage_read".to_string(),
+            "storage_write".to_string(),
+            "get".to_string(),
+        ]
+    );
+
+    // ----- Call sequence — dynamic execution order --------------------
+    // `increment` performs read+write, then `get` performs a final
+    // read.  Each contract_call / storage_read / storage_write entry
+    // emits exactly one call frame.
+    let call_sequence: Vec<String> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            e["function"]
+                .as_str()
+                .expect("call_entry.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        call_sequence,
+        vec![
+            "increment".to_string(),
+            "storage_read".to_string(),
+            "storage_write".to_string(),
+            "get".to_string(),
+            "storage_read".to_string(),
+        ]
+    );
+
+    // ----- counts -----------------------------------------------------
+    // 5 entries → 5 call frames + per-entry register_step (5) + the
+    // implicit `start()` step the writer emits at line 1 = 6 step
+    // events.  Storage read/write entries also emit a canonical
+    // `register_special_event(EventLogKind::Read|Write, ...)` so the
+    // io_events count is `2 (reads) + 1 (write) = 3`.  This matches the
+    // M10 spec target — every `#[storage]` op surfaces as both a call
+    // frame and an io_event.
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(6), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(3),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 6 steps + 5 call_entry + 5 call_exit + 3 io_events = 19 events.
+    assert_eq!(events.len(), 19, "events.len()");
+
+    // ----- io_event sequence -----------------------------------------
+    // The fixture executes:
+    //   increment(7) → storage_read("value")=0, storage_write("value", 0→7)
+    //   get()        → storage_read("value")=7
+    // so the io_event sequence is exactly Read, Write, Read with the
+    // matching `<contract>:<key>=<value(s)>` text baked in.
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(
+        io_events.len(),
+        3,
+        "expected 3 io events (read, write, read); got {io_events:?}"
+    );
+    let io_pairs: Vec<(String, String)> = io_events
+        .iter()
+        .map(|e| {
+            let io_kind = e["io_kind"].as_str().unwrap_or("").to_string();
+            let text = e["text"].as_str().unwrap_or("").to_string();
+            (io_kind, text)
+        })
+        .collect();
+    // The multi-stream Nim writer collapses the wider EventLogKind enum
+    // down to a 3-way IOEventKind: `EventLogKind::Read` → `ioFileOp` and
+    // `EventLogKind::Write` → `ioStdout` (see `toIOEventKind` in
+    // codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim).
+    // The discriminator that downstream consumers actually rely on lives
+    // in the `text` field, where our recorder embeds the
+    // `<contract>:<key>=<value(s)>` payload.  Pin both the kind tag (so a
+    // regression to a non-io variant fails loudly) and the embedded
+    // payload (so a regression in the recorder's content format fails
+    // here rather than at the consumer).
+    assert!(
+        io_pairs[0].0 == "ioFileOp" && io_pairs[0].1.contains("0xcafe:value=0"),
+        "first io_event should be a Read (ioFileOp) of value=0; got {:?}",
+        io_pairs[0]
+    );
+    assert!(
+        io_pairs[1].0 == "ioStdout" && io_pairs[1].1.contains("0xcafe:value=0->7"),
+        "second io_event should be a Write (ioStdout) of value 0->7; got {:?}",
+        io_pairs[1]
+    );
+    assert!(
+        io_pairs[2].0 == "ioFileOp" && io_pairs[2].1.contains("0xcafe:value=7"),
+        "third io_event should be a Read (ioFileOp) of value=7; got {:?}",
+        io_pairs[2]
     );
 }

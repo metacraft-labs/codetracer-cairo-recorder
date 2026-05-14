@@ -342,6 +342,23 @@ pub fn write_starknet_trace(
                 let _ = TraceWriter::arg(&mut *writer, "value", str_value(value, str_type_id));
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
                 TraceWriter::register_return(&mut *writer, NONE_VALUE);
+                // Surface the storage op as a canonical io_event so the
+                // event log reflects the on-chain state read.  The
+                // metadata is the bare op tag ("StorageRead") and the
+                // content carries `<contract>:<key>=<value>`.  This pairs
+                // with the corresponding StorageWrite arm below — both
+                // route through register_special_event with the
+                // canonical EventLogKind::Read / Write tags so frontend
+                // consumers can render storage I/O alongside contract
+                // events without re-parsing the call frame.
+                let metadata = "StorageRead";
+                let content = format!("{contract}:{key}={value}");
+                TraceWriter::register_special_event(
+                    &mut *writer,
+                    EventLogKind::Read,
+                    metadata,
+                    &content,
+                );
             }
             TraceEntry::StorageWrite {
                 contract,
@@ -360,6 +377,18 @@ pub fn write_starknet_trace(
                     TraceWriter::arg(&mut *writer, "new_value", str_value(new_value, str_type_id));
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
                 TraceWriter::register_return(&mut *writer, NONE_VALUE);
+                // Mirror the StorageRead arm: emit a Write-kinded
+                // special event whose content captures both the previous
+                // and new felt values so a downstream consumer can
+                // diff the storage slot without rebuilding state.
+                let metadata = "StorageWrite";
+                let content = format!("{contract}:{key}={old_value}->{new_value}");
+                TraceWriter::register_special_event(
+                    &mut *writer,
+                    EventLogKind::Write,
+                    metadata,
+                    &content,
+                );
             }
             TraceEntry::Event {
                 contract,
