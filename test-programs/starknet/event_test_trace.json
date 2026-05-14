@@ -1,0 +1,19 @@
+{
+  "test_name": "test_emit_transfer",
+  "contract_address": "0x1",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xbeef",
+      "selector": "transfer",
+      "calldata": ["0xaaa", "0xbbb", "100"]
+    },
+    {
+      "type": "event",
+      "contract": "0xbeef",
+      "keys": ["Transfer", "0xaaa"],
+      "data": ["0xbbb", "100"]
+    }
+  ]
+}

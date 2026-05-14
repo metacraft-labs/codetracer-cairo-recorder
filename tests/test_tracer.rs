@@ -1008,15 +1008,18 @@ fn test_control_flow_test_via_ct_print_full() {
     );
 
     // ----- Decoded variable values -----------------------------------
-    // Only `compute()`'s let-bindings + the synthetic trailing
-    // `return_value` carry values today (they're the only names that
-    // appear in the longest tuple-return slot).
+    // M10 round-2 numeric-width pin: `let mut i: u32 = 0;` in
+    // `loop_sum` now surfaces as a typed-Int step variable (`i = 0`)
+    // at its declaration line — pre-fix only `compute()`'s tuple-
+    // return slots carried values.  The remaining bindings still
+    // surface from the tuple-return-slot mapping.
     assert_eq!(
         observed_var_sequence(&doc),
         vec![
             ("raw".to_string(), 2),
             ("sign".to_string(), 20),
             ("loop_total".to_string(), 3),
+            ("i".to_string(), 0),
             ("picked".to_string(), 100),
             ("combined".to_string(), 123),
             ("return_value".to_string(), 123),
@@ -1369,6 +1372,11 @@ fn test_collections_test_via_ct_print_full() {
     // then recurses into the callee, where the compound binding fires
     // on its own `emit_line`.  So `arr_total` precedes `arr` (callee
     // contents) and `pair_total` precedes `pair`.
+    // M10 round 2: `pair_sum` contains `let (x, y) = pair;` which now
+    // expands into two scalar Int emissions (`x = 10`, `y = 20`) at the
+    // destructuring line.  The destructured children fire after the
+    // source `pair` Tuple binding (same line, ordering matches the
+    // recorder's per-line emit chain: scalar → compound → destructure).
     let observed = observed_var_kinds(&doc);
     assert_eq!(
         observed,
@@ -1377,6 +1385,8 @@ fn test_collections_test_via_ct_print_full() {
             ("arr".to_string(), "Sequence".to_string()),
             ("pair_total".to_string(), "Int".to_string()),
             ("pair".to_string(), "Tuple".to_string()),
+            ("x".to_string(), "Int".to_string()),
+            ("y".to_string(), "Int".to_string()),
             ("final_sum".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
@@ -1416,15 +1426,18 @@ fn test_collections_test_via_ct_print_full() {
         .collect();
     assert_eq!(pair_elements, vec![10, 20]);
 
-    // Scalar (Int) emissions remain unchanged.  `observed_var_sequence`
-    // still hard-rejects non-Int variants, so we filter the compound
-    // names out before comparing.
+    // Scalar (Int) emissions remain unchanged for the original bindings
+    // and now include the destructured children `x` / `y`.
+    // `observed_var_sequence` still hard-rejects non-Int variants, so we
+    // filter the compound names out before comparing.
     let scalar_only = observed_var_sequence_filtered(&doc, &["arr", "pair"]);
     assert_eq!(
         scalar_only,
         vec![
             ("arr_total".to_string(), 4),
             ("pair_total".to_string(), 30),
+            ("x".to_string(), 10),
+            ("y".to_string(), 20),
             ("final_sum".to_string(), 34),
             ("return_value".to_string(), 34),
         ]
@@ -2129,15 +2142,22 @@ fn test_loop_while_for_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // M10 round-2 numeric-width pin: each `let mut i: u32 = 0;` line
+    // (one per loop function) now also emits `i = 0` at the
+    // declaration line, ahead of the loop simulator's per-iteration
+    // emissions.  The simulator's emission sequence is otherwise
+    // unchanged (1,2,3 for `i` in loop_three; 1,2 in loop_double).
     assert_eq!(
         var_seq,
         vec![
+            ("i".to_string(), 0),
             ("acc".to_string(), 1),
             ("i".to_string(), 1),
             ("acc".to_string(), 2),
             ("i".to_string(), 2),
             ("acc".to_string(), 3),
             ("i".to_string(), 3),
+            ("i".to_string(), 0),
             ("acc".to_string(), 10),
             ("i".to_string(), 1),
             ("acc".to_string(), 20),
@@ -2360,5 +2380,733 @@ fn test_storage_test_via_ct_print_full() {
         io_pairs[2].0 == "ioFileOp" && io_pairs[2].1.contains("0xcafe:value=7"),
         "third io_event should be a Read (ioFileOp) of value=7; got {:?}",
         io_pairs[2]
+    );
+}
+
+// ===========================================================================
+// M10 round 2 — five additional fixtures pinning the next ValueRecord
+// shapes (destructuring, snapshot/ref, numeric widths, array operations,
+// StarkNet events).  Each fixture follows the same strict-`_via_ct_print_full`
+// shape established by the round-1 tests above: assertions are made on the
+// decoded JSON document with EXACT counts, EXACT decoded values, and an
+// upfront `assert_eq!` against the per-step variable kind / value sequence.
+// ===========================================================================
+
+// --- destructuring_test.cairo ---------------------------------------------
+
+/// Records `destructuring_test.cairo`.  The fixture exercises the
+/// `let (x, y) = pair;` destructuring shape: pre-fix only the source
+/// `pair` binding surfaced; post-fix `parse_destructure_bindings`
+/// expands the destructured names into their corresponding tuple-element
+/// values and emits each as a scalar `ValueRecord::Int` step variable
+/// at the destructuring line.
+#[test]
+fn test_destructuring_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_destructuring_test_via_ct_print_full",
+        "destructuring_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main.
+    assert_eq!(bare_fns, vec!["main", "use_pair"]);
+
+    let counts = &doc["counts"];
+    // 8 step events: implicit start(1) + main(2) + use_pair(4) +
+    // trailing return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
+    assert_eq!(events.len(), 12, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "use_pair".to_string()]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["use_pair".to_string(), "main".to_string()]
+    );
+
+    // Per-binding kind sequence — `pair` is a Tuple, the destructured
+    // children `x` / `y` are scalar Ints, `total` and `return_value`
+    // remain Int.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("pair".to_string(), "Tuple".to_string()),
+            ("x".to_string(), "Int".to_string()),
+            ("y".to_string(), "Int".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // Strict-shape assertion for the source `pair` Tuple.
+    let pair_value = find_var_value(&doc, "pair").expect("pair step variable");
+    assert_eq!(pair_value["kind"].as_str(), Some("Tuple"));
+    let pair_elements: Vec<i64> = pair_value["elements"]
+        .as_array()
+        .expect("pair.elements")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"));
+            e["i"].as_i64().expect("pair element i")
+        })
+        .collect();
+    assert_eq!(pair_elements, vec![10, 20]);
+
+    // Strict scalar values for the destructured children + tail bindings.
+    let scalar_only = observed_var_sequence_filtered(&doc, &["pair"]);
+    assert_eq!(
+        scalar_only,
+        vec![
+            ("x".to_string(), 10),
+            ("y".to_string(), 20),
+            ("total".to_string(), 30),
+            ("return_value".to_string(), 30),
+        ]
+    );
+
+    // Per-callee return values: use_pair returns x + y = 30; main
+    // delegates.
+    let exit_returns: Vec<(String, i64)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![("use_pair".to_string(), 30), ("main".to_string(), 30),]
+    );
+}
+
+// --- snapshot_ref_test.cairo ----------------------------------------------
+
+/// Records `snapshot_ref_test.cairo`.  Pins the M10 round-2 snapshot/ref
+/// parameter pin: `read_only(p: @Point)` surfaces a
+/// `ValueRecord::Reference { mutable: false, ... }` for `p` at the
+/// callee's entry step and `scale(ref p: Point, k: felt252)` surfaces a
+/// `ValueRecord::Reference { mutable: true, ... }` for `p` — the
+/// dereferenced `Point` struct walked under both.  Pre-fix the recorder
+/// did not track parameters at all; round-2 adds a static pass over
+/// `@<name>` / `ref <name>` call sites paired with the matching parameter
+/// declaration to recover the expected references.
+#[test]
+fn test_snapshot_ref_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_snapshot_ref_test_via_ct_print_full",
+        "snapshot_ref_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order: main → compute → read_only (called first in
+    // compute) → scale.
+    assert_eq!(bare_fns, vec!["main", "compute", "read_only", "scale"]);
+
+    // Type table: felt252 (scalar), Point{x,y} (struct), Ref
+    // (snapshot/ref carrier), type_0 (writer-side default felt id used
+    // for the synthetic return_value step variable).
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "Point{x,y}", "Ref", "type_0"]);
+
+    let counts = &doc["counts"];
+    // 16 step events: implicit start(1) + main(2) + compute(7) +
+    // read_only(2) + scale(3) + trailing return_value(1).
+    assert_eq!(counts["steps"].as_u64(), Some(16), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 16 steps + 4 call_entry + 4 call_exit = 24 events.
+    assert_eq!(events.len(), 24, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "compute".to_string(),
+            "read_only".to_string(),
+            "scale".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "read_only".to_string(),
+            "scale".to_string(),
+            "compute".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // Per-binding kind sequence — origin/shift Struct, p (snapshot
+    // entry of read_only) Reference, p (mutable entry of scale)
+    // Reference, total Int, return_value Int.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("origin".to_string(), "Struct".to_string()),
+            ("p".to_string(), "Reference".to_string()),
+            ("shift".to_string(), "Struct".to_string()),
+            ("p".to_string(), "Reference".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // Strict shape for the snapshot reference (read_only's `p`).  The
+    // dereferenced Struct carries `origin`'s field values (3, 4); the
+    // `mutable` flag is false; the synthesised address is deterministic
+    // (first-emitted reference gets the base address 0x1000 = 4096).
+    let p_refs: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().map(|a| a.iter()).into_iter().flatten())
+        .filter(|v| {
+            v["varname"].as_str() == Some("p") && v["value"]["kind"].as_str() == Some("Reference")
+        })
+        .map(|v| &v["value"])
+        .collect();
+    assert_eq!(p_refs.len(), 2, "expected exactly two `p` Reference vars");
+
+    let snap_ref = p_refs[0];
+    assert_eq!(snap_ref["mutable"].as_bool(), Some(false));
+    assert_eq!(snap_ref["address"].as_u64(), Some(0x1000));
+    assert_eq!(snap_ref["dereferenced"]["kind"].as_str(), Some("Struct"));
+    let snap_fields: Vec<i64> = snap_ref["dereferenced"]["field_values"]
+        .as_array()
+        .expect("snapshot dereferenced.field_values")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"));
+            e["i"].as_i64().expect("snap field i")
+        })
+        .collect();
+    assert_eq!(snap_fields, vec![3, 4]);
+
+    let mut_ref = p_refs[1];
+    assert_eq!(mut_ref["mutable"].as_bool(), Some(true));
+    // Second reference emission uses the next address slot
+    // (0x1000 + 0x10 = 0x1010 = 4112).
+    assert_eq!(mut_ref["address"].as_u64(), Some(0x1010));
+    assert_eq!(mut_ref["dereferenced"]["kind"].as_str(), Some("Struct"));
+    let mut_fields: Vec<i64> = mut_ref["dereferenced"]["field_values"]
+        .as_array()
+        .expect("mut dereferenced.field_values")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"));
+            e["i"].as_i64().expect("mut field i")
+        })
+        .collect();
+    assert_eq!(mut_fields, vec![10, 20]);
+
+    // Strict scalar emissions for the surrounding bindings.  origin
+    // and shift are Struct; total resolves to 7 + 60 = 67 (read_only
+    // returns 3+4=7; scale doubles shift to (20,40) → scaled_total=60).
+    let scalar_only = observed_var_sequence_filtered(&doc, &["origin", "shift", "p"]);
+    assert_eq!(
+        scalar_only,
+        vec![("total".to_string(), 67), ("return_value".to_string(), 67),]
+    );
+}
+
+// --- numeric_widths_test.cairo --------------------------------------------
+
+/// Records `numeric_widths_test.cairo`.  Pins the M10 round-2
+/// numeric-width pin: each `let <name>: <T> = <int_lit>;` line where
+/// `<T>` is one of u8/u16/u32/u64/u128/i8/i16/i32/i64/i128 surfaces as
+/// a `ValueRecord::Int` against a per-width type id (the `types` array
+/// gains a dedicated lang_type entry per width — `"u8"`, `"i64"`,
+/// etc.), distinct from the shared felt252 carrier.  `u256` surfaces
+/// as a dedicated `ValueRecord::Struct` with two `u128` halves matching
+/// Cairo's 2×u128 representation.
+#[test]
+fn test_numeric_widths_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_numeric_widths_test_via_ct_print_full",
+        "numeric_widths_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "use_widths"]);
+
+    // Every recognised width must appear in the trace's type table —
+    // that's the M10 round-2 width pin: a regression to the shared
+    // felt252 type id would drop these entries.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            "felt252",
+            "u8",
+            "type_1",
+            "u16",
+            "type_3",
+            "u32",
+            "type_5",
+            "u64",
+            "type_7",
+            "u128",
+            "type_9",
+            "i8",
+            "type_11",
+            "i16",
+            "type_13",
+            "i32",
+            "type_15",
+            "i64",
+            "type_17",
+            "i128",
+            "type_19",
+            "u256{low,high}",
+            "type_0",
+        ]
+    );
+
+    // ----- Per-binding kind sequence — every bounded-width binding
+    //       surfaces as Int, u_big as Struct, total / return_value
+    //       remain Int.  Source order is preserved.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("a8".to_string(), "Int".to_string()),
+            ("a16".to_string(), "Int".to_string()),
+            ("a32".to_string(), "Int".to_string()),
+            ("a64".to_string(), "Int".to_string()),
+            ("a128".to_string(), "Int".to_string()),
+            ("s8".to_string(), "Int".to_string()),
+            ("s16".to_string(), "Int".to_string()),
+            ("s32".to_string(), "Int".to_string()),
+            ("s64".to_string(), "Int".to_string()),
+            ("s128".to_string(), "Int".to_string()),
+            ("u_big".to_string(), "Struct".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Per-width Int values ---------------------------------------
+    // Helper: walk the type-id assignments registered by the writer to
+    // find which TypeKind the recorder used for `<name>`.  We assert
+    // both the value (so a regression in literal parsing fails loudly)
+    // AND that the type-id maps back to a registered lang_type matching
+    // the declared width.
+    let lookup_width_type = |name: &str| -> String {
+        let value = find_var_value(&doc, name).expect("var present");
+        let type_id = value["type_id"].as_u64().expect("type_id u64") as usize;
+        // The Nim writer interleaves the user-registered lang_type
+        // with auto-generated `type_<id>` aliases — the recorder's
+        // user-supplied lang_type lives at `type_id - 1` (the writer
+        // emits the user lang_type entry, then assigns the user-facing
+        // type_id one slot later as an alias).  This is a stable
+        // property of the writer's id assignment; if it changes, this
+        // helper needs an update — but the underlying lang_type still
+        // appears in the types array (asserted above).
+        types
+            .get(type_id - 1)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| panic!("type_id {} out of range", type_id))
+    };
+
+    let cases: &[(&str, &str, i64)] = &[
+        ("a8", "u8", 254),
+        ("a16", "u16", 65534),
+        ("a32", "u32", 4_000_000_000),
+        ("a64", "u64", 9_000_000_000_000_000_000),
+        ("a128", "u128", 1_234_567_890_123_456_789),
+        ("s8", "i8", -127),
+        ("s16", "i16", -32767),
+        ("s32", "i32", -2_000_000_000),
+        ("s64", "i64", -9_000_000_000_000_000_000),
+        ("s128", "i128", -123_456_789_012_345),
+    ];
+    for (name, want_type, want_value) in cases {
+        let value = find_var_value(&doc, name).expect("var present");
+        assert_eq!(
+            value["kind"].as_str(),
+            Some("Int"),
+            "{name} should decode as Int; got {value}"
+        );
+        assert_eq!(
+            value["i"].as_i64(),
+            Some(*want_value),
+            "{name} value mismatch"
+        );
+        let resolved = lookup_width_type(name);
+        assert_eq!(
+            resolved, *want_type,
+            "{name} should resolve to {want_type}; got {resolved}"
+        );
+    }
+
+    // ----- u256 strict shape ------------------------------------------
+    // Cairo's u256 = struct { low: u128, high: u128 }.  Literal 0
+    // splits to (low=0, high=0); the struct's lang_type is the
+    // dedicated `"u256{low,high}"` entry asserted in the types-table
+    // check above.
+    let u256_value = find_var_value(&doc, "u_big").expect("u_big present");
+    assert_eq!(u256_value["kind"].as_str(), Some("Struct"));
+    let u256_fields: Vec<i64> = u256_value["field_values"]
+        .as_array()
+        .expect("u256.field_values")
+        .iter()
+        .map(|e| {
+            assert_eq!(
+                e["kind"].as_str(),
+                Some("Int"),
+                "u256 half should be Int; got {e}"
+            );
+            e["i"].as_i64().expect("u256 half i")
+        })
+        .collect();
+    assert_eq!(u256_fields, vec![0, 0]);
+}
+
+// --- array_operations_test.cairo ------------------------------------------
+
+/// Records `array_operations_test.cairo`.  Pins the M10 round-2 array
+/// operations pin: the `array![1, 2, 3, 4]` macro form initialises an
+/// `Array<felt252>` compound binding (pre-fix only `ArrayTrait::new()`
+/// + `.append(...)` was recognised), `<arr>.pop_front();` re-emits
+/// the array's contents post-mutation as a new
+/// `ValueRecord::Sequence` step variable, and `*<arr>.at(idx)` reads
+/// the element at the given index without mutating the array.
+#[test]
+fn test_array_operations_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_array_operations_test_via_ct_print_full",
+        "array_operations_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "use_array"]);
+
+    let counts = &doc["counts"];
+    // Step events: implicit start(1) + main(2) + use_array(4) +
+    // trailing return_value(1) = 8.
+    assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
+    assert_eq!(events.len(), 12, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    // ----- Per-binding kind sequence ----------------------------------
+    // The array `a` surfaces as a `Sequence` twice — once at the
+    // `array![]` initialiser line, once after `pop_front()`.  `head`
+    // and `return_value` are scalar Int.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("a".to_string(), "Sequence".to_string()),
+            ("a".to_string(), "Sequence".to_string()),
+            ("head".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Strict array-shape assertions ------------------------------
+    // Walk the events in order; the first `a` Sequence is the literal
+    // initialiser ([1, 2, 3, 4]), the second is post-pop_front
+    // ([2, 3, 4]).
+    let a_emissions: Vec<Vec<i64>> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().map(|a| a.iter()).into_iter().flatten())
+        .filter(|v| {
+            v["varname"].as_str() == Some("a") && v["value"]["kind"].as_str() == Some("Sequence")
+        })
+        .map(|v| {
+            v["value"]["elements"]
+                .as_array()
+                .expect("a.elements")
+                .iter()
+                .map(|e| {
+                    assert_eq!(e["kind"].as_str(), Some("Int"));
+                    e["i"].as_i64().expect("a element i")
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(a_emissions, vec![vec![1, 2, 3, 4], vec![2, 3, 4]]);
+
+    // ----- `head` is the element at index 0 *after* pop_front,
+    //       i.e. 2 (the original array's second element).
+    let scalar_only = observed_var_sequence_filtered(&doc, &["a"]);
+    assert_eq!(
+        scalar_only,
+        vec![("head".to_string(), 2), ("return_value".to_string(), 2),]
+    );
+
+    // ----- Per-callee return values: use_array returns 2; main
+    //       delegates.
+    let exit_returns: Vec<(String, i64)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            let i = e["return_value"]["i"].as_i64().unwrap_or_else(|| {
+                panic!(
+                    "call_exit.return_value must be Int; got {}",
+                    e["return_value"]
+                )
+            });
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        exit_returns,
+        vec![("use_array".to_string(), 2), ("main".to_string(), 2),]
+    );
+}
+
+// --- event_test (snforge-converter path) ----------------------------------
+
+/// Records the event_test snforge JSON fixture through
+/// `starknet::write_starknet_trace` and asserts that the `#[event]` /
+/// `self.emit(...)` event surfaces as a tagged `StarknetEvent` io_event
+/// with the indexed (`#[key]`) fields distinguishable from data fields
+/// in the embedded payload.  The matching Cairo source lives at
+/// `test-programs/cairo/event_test.cairo` for documentation but is not
+/// compiled by the recorder (it has no `fn main` and the
+/// `#[starknet::contract]` dispatcher requires a separate runtime that
+/// the in-process Sierra runner does not provide).
+#[test]
+fn test_event_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_event_test_via_ct_print_full") else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("event_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse event_test snforge trace");
+
+    // Sanity-check the parsed entry shape — one contract_call followed
+    // by one event entry.
+    assert_eq!(entries.len(), 2, "expected 2 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // Function table: the contract_call entry registers one frame.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<String> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap().to_string())
+        .collect();
+    assert_eq!(bare_fns, vec!["transfer".to_string()]);
+
+    // Counts: 1 contract_call (1 step + 1 call_entry + 1 call_exit)
+    // + 1 event (1 step + 1 io_event) + the implicit `start()` step
+    // at line 1 = 3 steps total.
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(1), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(3), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(1),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 3 steps + 1 call_entry + 1 call_exit + 1 io_event = 6 events.
+    assert_eq!(events.len(), 6, "events.len()");
+
+    // ----- io_event sequence -----------------------------------------
+    // The event emits as `EventLogKind::EvmEvent`, which the
+    // multi-stream writer maps to `ioStderr`.  The text field carries
+    // both the canonical `StarknetEvent:<contract>` tag (so consumers
+    // can dispatch on it) and the structured `keys=[...] data=[...]`
+    // payload — `keys` holds the indexed (`#[key]`) fields, `data`
+    // the remainder.  The Transfer event in the fixture has two
+    // indexed values (the discriminator + the `from` address) and two
+    // data values (the `to` address + amount).
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(
+        io_events.len(),
+        1,
+        "expected exactly one io event for the emitted Transfer; got {io_events:?}"
+    );
+    let ev = io_events[0];
+    assert_eq!(
+        ev["io_kind"].as_str(),
+        Some("ioStderr"),
+        "StarkNet event must surface as ioStderr (multi-stream writer's \
+         tag for EvmEvent); got {ev}"
+    );
+    let text = ev["text"].as_str().expect("io.text str");
+    // Strict-shape pin: the exact text format combines the
+    // `StarknetEvent:<contract>` metadata tag with the structured
+    // keys / data lists in source order.
+    assert_eq!(
+        text, "StarknetEvent:0xbeef keys=[Transfer, 0xaaa] data=[0xbbb, 100]",
+        "io text must carry the canonical StarknetEvent metadata tag plus \
+         the structured keys=[…] data=[…] payload"
+    );
+
+    // ----- Call-entry args carry the contract_call's calldata as
+    //       canonical args (audit (b)).  This pins the wider snforge
+    //       converter shape — the events fixture exercises the same
+    //       calldata-as-args flow as storage_test, but with three
+    //       calldata values instead of one.
+    let call_entry = events
+        .iter()
+        .find(|e| e["kind"] == "call_entry")
+        .expect("call_entry event");
+    let arg_pairs: Vec<(String, String)> = call_entry["args"]
+        .as_array()
+        .expect("call_entry.args array")
+        .iter()
+        .map(|a| {
+            let name = a["varname"].as_str().expect("varname str").to_string();
+            let value = a["value"]["text"].as_str().expect("text str").to_string();
+            (name, value)
+        })
+        .collect();
+    assert_eq!(
+        arg_pairs,
+        vec![
+            ("caller".to_string(), "0x1".to_string()),
+            ("callee".to_string(), "0xbeef".to_string()),
+            ("selector".to_string(), "transfer".to_string()),
+            ("calldata0".to_string(), "0xaaa".to_string()),
+            ("calldata1".to_string(), "0xbbb".to_string()),
+            ("calldata2".to_string(), "100".to_string()),
+        ]
     );
 }
