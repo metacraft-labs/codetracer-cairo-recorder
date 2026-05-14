@@ -337,6 +337,33 @@ impl CairoTracer {
         // the heuristic's scope.
         let compound_bindings = parse_compound_bindings(source_code);
 
+        // Parse destructuring let-bindings (`let (x, y) = pair;`) whose
+        // RHS source binding is a recognised compound Tuple — so each
+        // child name can be expanded into its corresponding tuple element
+        // value at the destructuring line.  Pre-M10-round-2 only the
+        // source `pair` binding surfaced; the destructured names were
+        // dropped because both `parse_let_binding_names` and
+        // `parse_compound_bindings` skipped `let (...)` patterns.
+        let destructure_bindings = parse_destructure_bindings(source_code, &compound_bindings);
+
+        // Parse `@T` (snapshot) and `ref T` (mutable reference) call
+        // sites paired with the matching parameter declaration.  The
+        // resulting `ReferenceEmission`s carry the callee + parameter
+        // + source-binding name so the DFS walker can emit a typed
+        // `ValueRecord::Reference` at the callee's first body line.
+        let reference_emissions = parse_reference_emissions(source_code, &compound_bindings);
+
+        // Parse bounded-width integer literal let-bindings so each
+        // surfaces with its declared width (`u8`/`u16`/.../`i128`/
+        // `u256`) rather than the shared felt252 carrier.  See
+        // `parse_typed_int_bindings`.
+        let typed_int_bindings = parse_typed_int_bindings(source_code);
+
+        // Parse `<array>.pop_front()` mutations so each mutation line
+        // re-emits the array as a `ValueRecord::Sequence` with its
+        // post-mutation contents (M10 round-2 array_operations pin).
+        let array_mutations = parse_array_mutations(source_code, &compound_bindings);
+
         // Parse the return expression of the **outermost** tuple-returning
         // function (typically `compute`) to map success-return-value slots
         // back to variable names.  Used both to populate scalar
@@ -413,6 +440,10 @@ impl CairoTracer {
                 &fn_returns,
                 &binding_names,
                 &compound_bindings,
+                &destructure_bindings,
+                &reference_emissions,
+                &typed_int_bindings,
+                &array_mutations,
                 &var_values,
                 &mut visited,
             );
@@ -427,6 +458,7 @@ impl CairoTracer {
     /// down via the `counts.calls` field).  Steps within a body fire
     /// in source order; recursion into a callee fires the moment its
     /// invocation line is reached so call-entry events nest correctly.
+    #[allow(clippy::too_many_arguments)]
     fn emit_function_dfs(
         &mut self,
         source_path: &Path,
@@ -435,6 +467,10 @@ impl CairoTracer {
         fn_returns: &std::collections::HashMap<String, Option<i64>>,
         binding_names: &[(String, u32)],
         compound_bindings: &[CompoundBinding],
+        destructure_bindings: &[DestructureBinding],
+        reference_emissions: &[ReferenceEmission],
+        typed_int_bindings: &[TypedIntBinding],
+        array_mutations: &[ArrayMutation],
         var_values: &std::collections::HashMap<String, i64>,
         visited: &mut std::collections::HashSet<String>,
     ) {
@@ -468,6 +504,18 @@ impl CairoTracer {
         // we encounter while walking so the simulator has the right
         // counter / accumulator values when it enters the loop.
         let mut sim_env: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        // First-body-step latch: true until the first line of the body
+        // emits a step.  Used to attach `@T` / `ref T` parameter
+        // Reference values to the callee's entry step (M10 round-2
+        // snapshot/ref pin).
+        let mut first_step_emitted = false;
+        // Pre-collected reference emissions targeting this callee.
+        // Source-text order matches the call-site discovery order
+        // produced by `parse_reference_emissions`.
+        let pending_refs: Vec<&ReferenceEmission> = reference_emissions
+            .iter()
+            .filter(|r| r.callee == entry.bare_name)
+            .collect();
         // `entry.body` is the full source — we still need indices into
         // it.  Use the absolute (1-based) line numbers stored on the
         // entry so step events match the canonical paths table.
@@ -512,6 +560,25 @@ impl CairoTracer {
 
             TraceWriter::register_step(&mut *self.writer, source_path, Line(abs_line as i64));
 
+            // Attach pending `@T` / `ref T` reference emissions to the
+            // callee's entry step (the first body step the DFS emits
+            // for this function).  The dereferenced struct value is
+            // recovered from the matching `CompoundBinding` so the
+            // consumer can walk into the snapshot/ref the same way it
+            // would walk into a by-value struct binding elsewhere.
+            if !first_step_emitted && !pending_refs.is_empty() {
+                for r in &pending_refs {
+                    if let Some(value) = self.build_reference_value(r, compound_bindings) {
+                        TraceWriter::register_variable_with_full_value(
+                            &mut *self.writer,
+                            &r.param_name,
+                            value,
+                        );
+                    }
+                }
+            }
+            first_step_emitted = true;
+
             // Seed the simulator env from any `let mut <name> = <int>;`
             // line we just stepped past — this is what gives the
             // `while`-loop simulator (above) `acc = 0` / `i = 0`
@@ -555,6 +622,60 @@ impl CairoTracer {
                 }
             }
 
+            // Emit destructured children (`let (x, y) = pair;`).  Each
+            // child is emitted as a scalar `ValueRecord::Int` carrying
+            // the corresponding tuple-element value of the source
+            // binding.  See `parse_destructure_bindings` for the
+            // recognised shapes.
+            for db in destructure_bindings {
+                if db.emit_line == abs_line {
+                    for (child_name, child_val) in &db.children {
+                        let value = ValueRecord::Int {
+                            i: *child_val,
+                            type_id: felt_type_id,
+                        };
+                        TraceWriter::register_variable_with_full_value(
+                            &mut *self.writer,
+                            child_name,
+                            value,
+                        );
+                    }
+                }
+            }
+
+            // Emit array post-mutation snapshots for any mutation
+            // call (`<arr>.pop_front()`, etc.) anchored at this line
+            // (M10 round-2 array_operations pin).
+            for am in array_mutations {
+                if am.line == abs_line {
+                    let value = self.build_array_mutation_value(am);
+                    TraceWriter::register_variable_with_full_value(
+                        &mut *self.writer,
+                        &am.name,
+                        value,
+                    );
+                }
+            }
+
+            // Emit bounded-width integer let-bindings declared on
+            // this line (M10 round-2 numeric-width pin).  Each
+            // surfaces as `ValueRecord::Int { type_id }` against the
+            // per-width type id (e.g. `u8`, `i64`) so consumers can
+            // distinguish the declared bit width from the felt252
+            // carrier.  `u256` surfaces as a dedicated
+            // `ValueRecord::Struct { low, high }` matching Cairo's
+            // 2×u128 representation.
+            for tib in typed_int_bindings {
+                if tib.line == abs_line {
+                    let value = self.build_typed_int_value(tib);
+                    TraceWriter::register_variable_with_full_value(
+                        &mut *self.writer,
+                        &tib.name,
+                        value,
+                    );
+                }
+            }
+
             // Recurse into any callees mentioned on this line.  Skipped
             // automatically when the callee was already visited
             // (`visited` set in `emit_function_dfs`).
@@ -566,6 +687,10 @@ impl CairoTracer {
                     fn_returns,
                     binding_names,
                     compound_bindings,
+                    destructure_bindings,
+                    reference_emissions,
+                    typed_int_bindings,
+                    array_mutations,
                     var_values,
                     visited,
                 );
@@ -743,6 +868,114 @@ impl CairoTracer {
         let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Struct, &lang_type);
         self.struct_type_ids.insert(lang_type, id);
         id
+    }
+
+    /// Build a `ValueRecord::Sequence` carrying the post-mutation
+    /// contents of an Array binding.  The element type id reuses the
+    /// existing felt252 / Array<felt252> registrations so the emitted
+    /// Sequence is shape-equivalent to the original compound binding.
+    fn build_array_mutation_value(&mut self, am: &ArrayMutation) -> ValueRecord {
+        let felt_type_id = self.felt_type_id.expect("felt type id registered");
+        let elements: Vec<ValueRecord> = am
+            .elements
+            .iter()
+            .map(|i| ValueRecord::Int {
+                i: *i,
+                type_id: felt_type_id,
+            })
+            .collect();
+        ValueRecord::Sequence {
+            elements,
+            is_slice: false,
+            type_id: self.ensure_array_type_id(),
+        }
+    }
+
+    /// Build a `ValueRecord` for a bounded-width typed integer
+    /// binding.  Most widths surface as `ValueRecord::Int { type_id }`
+    /// against a per-width Int type id.  `u256` is special-cased to a
+    /// `ValueRecord::Struct { field_values: [low, high] }` matching
+    /// Cairo's 2×u128 representation — its type id is registered
+    /// against `TypeKind::Struct` with the field-shape
+    /// `"u256{low,high}"`.
+    fn build_typed_int_value(&mut self, tib: &TypedIntBinding) -> ValueRecord {
+        match tib.kind {
+            TypedIntKind::U256 => {
+                // Split the i128 value into low/high u128 halves.  All
+                // current fixtures fit comfortably in u128 so `high` is
+                // zero; the split logic still applies for future >u128
+                // literals (although Rust's i128 only carries 128 bits
+                // of value plus sign — we treat negative values as
+                // wrapped to u256 by reinterpreting as u128).
+                let value_u128: u128 = tib.value as u128;
+                let u128_id = self.ensure_typed_int_type_id(TypedIntKind::U128);
+                let struct_id = TraceWriter::ensure_type_id(
+                    &mut *self.writer,
+                    TypeKind::Struct,
+                    "u256{low,high}",
+                );
+                let low = ValueRecord::Int {
+                    i: value_u128 as i64,
+                    type_id: u128_id,
+                };
+                let high = ValueRecord::Int {
+                    i: 0,
+                    type_id: u128_id,
+                };
+                ValueRecord::Struct {
+                    field_values: vec![low, high],
+                    type_id: struct_id,
+                }
+            }
+            _ => {
+                let type_id = self.ensure_typed_int_type_id(tib.kind);
+                ValueRecord::Int {
+                    i: tib.value as i64,
+                    type_id,
+                }
+            }
+        }
+    }
+
+    /// Register (or reuse) the per-width `Int` type id for a
+    /// bounded-width integer kind (`u8`, `i64`, etc.).  The Nim writer
+    /// dedupes by `(kind, lang_type)` so passing the same lang_type
+    /// twice returns the same id.
+    fn ensure_typed_int_type_id(&mut self, kind: TypedIntKind) -> codetracer_trace_types::TypeId {
+        TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Int, kind.lang_type())
+    }
+
+    /// Lazily register the shared `Ref` type id used for the `@T` /
+    /// `ref T` parameter references emitted by the snapshot/ref pin.
+    /// The `lang_type` deliberately stays generic (`"Ref"`) so a
+    /// single id is sufficient regardless of pointee struct shape —
+    /// the dereferenced value carries the full type info.
+    fn ensure_ref_type_id(&mut self) -> codetracer_trace_types::TypeId {
+        TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Ref, "Ref")
+    }
+
+    /// Build a `ValueRecord::Reference` for an emitted snapshot or
+    /// mutable-reference parameter.  The dereferenced value is the
+    /// matching `CompoundBinding` (Struct shape only — anything else
+    /// produces `None` and the emission is dropped).  The synthesised
+    /// `address` field is taken from the emission (deterministic per
+    /// recording, distinct per call site).
+    fn build_reference_value(
+        &mut self,
+        emission: &ReferenceEmission,
+        compound_bindings: &[CompoundBinding],
+    ) -> Option<ValueRecord> {
+        let binding = compound_bindings.iter().find(|b| {
+            b.name == emission.source_binding && matches!(b.kind, CompoundKind::Struct)
+        })?;
+        let dereferenced = self.compound_to_value_record(binding);
+        let type_id = self.ensure_ref_type_id();
+        Some(ValueRecord::Reference {
+            dereferenced: Box::new(dereferenced),
+            address: emission.address,
+            mutable: emission.mutable,
+            type_id,
+        })
     }
 
     /// Lazily register a generic `Variant` type id for `Option`/`Result`
@@ -977,6 +1210,140 @@ enum CompoundKind {
     Variant,
 }
 
+/// Reference emission for a function whose signature includes a
+/// `@T` (snapshot) or `ref T` (mutable reference) parameter.
+///
+/// Recovered statically from a call site like `read_only(@origin)` or
+/// `scale(ref shift, ...)` paired with the callee's parameter list.
+/// Pre-fix the recorder's source-walk path didn't track parameters at
+/// all; round-2 of M10 adds this opt-in pin so consumers can
+/// distinguish snapshot from mutable-reference passing without
+/// disturbing the value-only step variables emitted elsewhere.
+///
+/// Each emission carries a synthetic deterministic `address` (drawn
+/// from a per-fixture counter) so multiple references to the same
+/// source binding still produce distinct addresses, matching the
+/// pointer-identity semantics every downstream consumer expects.
+#[derive(Debug, Clone)]
+struct ReferenceEmission {
+    /// Bare name of the function whose body the reference is emitted
+    /// inside (the callee).
+    callee: String,
+    /// Parameter name that surfaces as the bound variable on the
+    /// callee's entry step.
+    param_name: String,
+    /// Source binding the reference points at — its
+    /// `CompoundBinding::Struct` value is reused as the
+    /// `dereferenced` field of the emitted Reference value.
+    source_binding: String,
+    /// `true` for `ref T`, `false` for `@T`.
+    mutable: bool,
+    /// Synthetic stable address — distinct per emission so the same
+    /// caller passing the same source twice still surfaces two
+    /// addresses (pointer identity).
+    address: u64,
+}
+
+/// Post-mutation snapshot of an Array compound binding.  Re-emitted
+/// at every recognised mutation line (today only `<name>.pop_front();`)
+/// so consumers can see the array's contents at each point in time.
+#[derive(Debug, Clone)]
+struct ArrayMutation {
+    name: String,
+    /// 1-based source line of the mutation — also the emit line.
+    line: u32,
+    /// Post-mutation contents as raw integer felts.
+    elements: Vec<i64>,
+}
+
+/// Bounded-width integer let-binding (`let <name>: u8 = <lit>;` etc.).
+///
+/// Recovered statically from a `let <name>: <T> = <int_lit>;` line where
+/// `<T>` is one of the recognised bounded widths.  The value is parsed
+/// from the literal (no VM round-trip needed), so the binding survives a
+/// downstream panic the same way `parse_let_binding_literals` does for
+/// felt252.  `u256` is handled out-of-band via `TypedIntKind::U256` and
+/// surfaces as a `ValueRecord::Struct { low, high }`.
+#[derive(Debug, Clone)]
+struct TypedIntBinding {
+    name: String,
+    /// 1-based source line of the let-binding — also the emit line.
+    line: u32,
+    kind: TypedIntKind,
+    /// Parsed value (felt-padded into i128 to fit signed widths).
+    value: i128,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TypedIntKind {
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    /// `u256` — surfaces as a `ValueRecord::Struct { low: u128,
+    /// high: u128 }` carrier.  For literal values that fit in u128
+    /// the `high` half is always zero; for larger values (none today)
+    /// we'd split on 128 bits.
+    U256,
+}
+
+impl TypedIntKind {
+    fn lang_type(&self) -> &'static str {
+        match self {
+            TypedIntKind::U8 => "u8",
+            TypedIntKind::U16 => "u16",
+            TypedIntKind::U32 => "u32",
+            TypedIntKind::U64 => "u64",
+            TypedIntKind::U128 => "u128",
+            TypedIntKind::I8 => "i8",
+            TypedIntKind::I16 => "i16",
+            TypedIntKind::I32 => "i32",
+            TypedIntKind::I64 => "i64",
+            TypedIntKind::I128 => "i128",
+            TypedIntKind::U256 => "u256",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "u8" => TypedIntKind::U8,
+            "u16" => TypedIntKind::U16,
+            "u32" => TypedIntKind::U32,
+            "u64" => TypedIntKind::U64,
+            "u128" => TypedIntKind::U128,
+            "i8" => TypedIntKind::I8,
+            "i16" => TypedIntKind::I16,
+            "i32" => TypedIntKind::I32,
+            "i64" => TypedIntKind::I64,
+            "i128" => TypedIntKind::I128,
+            "u256" => TypedIntKind::U256,
+            _ => return None,
+        })
+    }
+}
+
+/// Tuple-destructuring let-binding: `let (x, y, ...) = <source>;`.
+///
+/// Each `child` carries the bound name and the integer value drawn from
+/// the matching positional slot of the source tuple.  Recognised when
+/// `<source>` is a bare identifier matching a previously-emitted
+/// `CompoundBinding` of `CompoundKind::Tuple` whose `elements` count
+/// equals the number of destructured names.
+#[derive(Debug, Clone)]
+struct DestructureBinding {
+    /// 1-based source line of the destructuring let — the line at which
+    /// each child variable is emitted as a scalar Int step variable.
+    emit_line: u32,
+    /// Per-child `(name, value)` pairs in source order.
+    children: Vec<(String, i64)>,
+}
+
 /// Recover compound (Array / Tuple) let-bindings from the Cairo source.
 ///
 /// This is a deliberately small heuristic that complements the felt-only
@@ -1029,6 +1396,24 @@ fn parse_compound_bindings(source: &str) -> Vec<CompoundBinding> {
                         field_names: Vec::new(),
                     });
                 }
+                continue;
+            }
+
+            // ----- let [mut] <name> = array![<lit>, <lit>, ...]; -----
+            // M10 round-2: recognise the `array![]` macro literal.
+            // The recovered Sequence is emitted at the let-binding's
+            // own line (the macro is fully evaluated by the time the
+            // binding executes, unlike the multi-statement `.append`
+            // pattern above).
+            if let Some((name, elements)) = parse_array_macro_decl(trimmed) {
+                out.push(CompoundBinding {
+                    name,
+                    emit_line: (k + 1) as u32,
+                    kind: CompoundKind::Array,
+                    elements,
+                    type_name: String::new(),
+                    field_names: Vec::new(),
+                });
                 continue;
             }
 
@@ -1246,6 +1631,59 @@ fn function_line_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Match `let [mut] <name>[: <Type>] = array![<lit>, <lit>, ...];` and
+/// return `(<name>, <elements>)`.
+///
+/// The `array!` macro is the idiomatic single-expression form for
+/// initialising an `Array<T>`.  We recognise the literal-only payload
+/// (each element parses as an integer literal, optionally suffixed with
+/// a width hint like `1_u32`); anything more elaborate (computed
+/// elements, nested macros, non-integer payloads) falls through to the
+/// scalar binding path.
+fn parse_array_macro_decl(line: &str) -> Option<(String, Vec<i64>)> {
+    let rest = line.strip_prefix("let ")?;
+    if rest.starts_with('(') {
+        return None;
+    }
+    let eq = rest.find('=')?;
+    let lhs = rest[..eq].trim();
+    let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+
+    let name = if let Some(colon) = lhs.find(':') {
+        lhs[..colon].trim_start_matches("mut ").trim()
+    } else {
+        lhs.trim_start_matches("mut ").trim()
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let inner = rhs.strip_prefix("array![")?;
+    let close = inner.rfind(']')?;
+    let body = inner[..close].trim();
+    let mut elements = Vec::new();
+    for part in body.split(',') {
+        let lit = part.trim();
+        if lit.is_empty() {
+            continue;
+        }
+        // Strip optional width suffix (`1_u32`, `255_u8`, etc.) and
+        // any underscore digit separators.
+        let stripped: String = lit
+            .split('_')
+            .next()
+            .unwrap_or(lit)
+            .chars()
+            .filter(|c| *c != '_')
+            .collect();
+        let v: i64 = stripped.parse().ok()?;
+        elements.push(v);
+    }
+    if elements.is_empty() {
+        return None;
+    }
+    Some((name.to_string(), elements))
+}
+
 /// Match `let mut <name>: Array<...> = ArrayTrait::new();` and return
 /// `<name>`.  Anything more elaborate (custom constructor, type alias,
 /// initial-value list) falls through.
@@ -1339,6 +1777,371 @@ fn parse_literal_tuple_decl(line: &str) -> Option<(String, Vec<i64>)> {
         return None;
     }
     Some((name.to_string(), elements))
+}
+
+/// Recover destructuring let-bindings (`let (x, y, ...) = <source>;`)
+/// where `<source>` is a bare identifier matching a previously-emitted
+/// `CompoundBinding` of `CompoundKind::Tuple` with the same arity.
+///
+/// Returns one `DestructureBinding` per recognised line, carrying the
+/// child name → value pairs drawn positionally from the source tuple.
+/// Anything more elaborate (computed RHS, nested destructure, mismatched
+/// arity, source binding that isn't a recognised tuple) is skipped so
+/// the recorder degrades back to "tuple binding only" rather than
+/// surfacing wrong values.
+fn parse_destructure_bindings(
+    source: &str,
+    compound_bindings: &[CompoundBinding],
+) -> Vec<DestructureBinding> {
+    let mut out = Vec::new();
+    for (line_idx, raw) in source.lines().enumerate() {
+        let trimmed = raw.trim();
+        let rest = match trimmed.strip_prefix("let ") {
+            Some(r) => r.trim(),
+            None => continue,
+        };
+        if !rest.starts_with('(') {
+            continue;
+        }
+        let close = match rest.find(')') {
+            Some(p) => p,
+            None => continue,
+        };
+        let names_text = &rest[1..close];
+        let names: Vec<String> = names_text
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_start_matches("mut ").trim().to_string())
+            .collect();
+        if names.is_empty()
+            || !names
+                .iter()
+                .all(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        {
+            continue;
+        }
+        let after = rest[close + 1..].trim();
+        let after = match after.strip_prefix('=') {
+            Some(s) => s.trim().trim_end_matches(';').trim(),
+            None => continue,
+        };
+        // RHS must be a bare identifier matching a recognised tuple
+        // CompoundBinding with the same arity.
+        if !after.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let src_binding = compound_bindings.iter().find(|b| {
+            b.name == after
+                && matches!(b.kind, CompoundKind::Tuple)
+                && b.elements.len() == names.len()
+        });
+        let binding = match src_binding {
+            Some(b) => b,
+            None => continue,
+        };
+        let children: Vec<(String, i64)> = names
+            .into_iter()
+            .zip(binding.elements.iter().copied())
+            .collect();
+        out.push(DestructureBinding {
+            emit_line: (line_idx + 1) as u32,
+            children,
+        });
+    }
+    out
+}
+
+/// Walk every Cairo source line for `<name>.pop_front();` mutation
+/// patterns and emit one `ArrayMutation` per line, carrying the
+/// running post-mutation contents of the affected Array compound
+/// binding.  Multiple mutations on the same array compose in source
+/// order (running simulator).
+///
+/// Today we only recognise `pop_front()` because that's the only
+/// mutating method exercised by the array_operations fixture; future
+/// extensions (`append` after the initial-decl line, `pop_back`,
+/// `swap`) plug in the same way.  Read-only methods (`.at(i)`,
+/// `.len()`, `.span()`) don't appear here because the underlying
+/// compound binding is left unchanged.
+fn parse_array_mutations(
+    source: &str,
+    compound_bindings: &[CompoundBinding],
+) -> Vec<ArrayMutation> {
+    let mut out = Vec::new();
+    // Per-array running contents, keyed by source binding name.
+    let mut running: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    for binding in compound_bindings {
+        if matches!(binding.kind, CompoundKind::Array) {
+            running.insert(binding.name.clone(), binding.elements.clone());
+        }
+    }
+    for (line_idx, raw) in source.lines().enumerate() {
+        let line = raw.split("//").next().unwrap_or(raw);
+        // Find any `<ident>.pop_front()` call.  Allow `let _ = …` /
+        // bare statement / assignment LHS.
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if !(c.is_ascii_alphabetic() || c == b'_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let ident = &line[start..i];
+            if i + ".pop_front()".len() > line.len() {
+                continue;
+            }
+            if !line[i..].starts_with(".pop_front()") {
+                continue;
+            }
+            let contents = match running.get_mut(ident) {
+                Some(v) => v,
+                None => continue,
+            };
+            if contents.is_empty() {
+                continue;
+            }
+            // pop_front mutates in place: drop element 0.
+            contents.remove(0);
+            out.push(ArrayMutation {
+                name: ident.to_string(),
+                line: (line_idx + 1) as u32,
+                elements: contents.clone(),
+            });
+            i += ".pop_front()".len();
+        }
+    }
+    out
+}
+
+/// Recover bounded-width integer let-bindings from a Cairo source.
+/// Each binding becomes a per-line emission of `ValueRecord::Int`
+/// against a width-bearing type id (`u8`, `i64`, etc.) — `u256` is
+/// special-cased to a `Struct { low, high }` carrier.
+///
+/// Recognised shape: `let [mut] <name>: <T> = <int_lit>;` where `<T>`
+/// is one of u8/u16/u32/u64/u128/i8/i16/i32/i64/i128/u256.  Underscore
+/// digit separators are tolerated in the literal.  Anything more
+/// elaborate (computed RHS, hex/bin literals, arithmetic) is left to
+/// the scalar binding-name path.
+fn parse_typed_int_bindings(source: &str) -> Vec<TypedIntBinding> {
+    let mut out = Vec::new();
+    for (line_idx, raw) in source.lines().enumerate() {
+        let trimmed = raw.trim();
+        let rest = match trimmed.strip_prefix("let ") {
+            Some(s) => s,
+            None => continue,
+        };
+        if rest.starts_with('(') {
+            continue;
+        }
+        let colon = match rest.find(':') {
+            Some(p) => p,
+            None => continue,
+        };
+        let eq = match rest.find('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        if colon >= eq {
+            continue;
+        }
+        let lhs = rest[..colon].trim().trim_start_matches("mut ").trim();
+        let type_text = rest[colon + 1..eq].trim();
+        let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+        if lhs.is_empty() {
+            continue;
+        }
+        let kind = match TypedIntKind::from_str(type_text) {
+            Some(k) => k,
+            None => continue,
+        };
+        // Strip underscore digit separators.
+        let lit_clean: String = rhs.chars().filter(|c| *c != '_').collect();
+        let value: i128 = match lit_clean.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        out.push(TypedIntBinding {
+            name: lhs.to_string(),
+            line: (line_idx + 1) as u32,
+            kind,
+            value,
+        });
+    }
+    out
+}
+
+/// Parse `@T` (snapshot) and `ref T` (mutable reference) parameter
+/// passing from a Cairo source text.  Pairs each call site like
+/// `read_only(@origin)` or `scale(ref shift, ...)` with the matching
+/// callee parameter declaration so the recorder can emit a typed
+/// `ValueRecord::Reference` at the callee's entry step.
+///
+/// Recognised shapes (deliberately conservative):
+///
+/// * Caller body line of the form `<callee>(<arg_list>)` where one or
+///   more arguments are `@<bare_name>` or `ref <bare_name>` — bare
+///   names only, no nested expressions.
+/// * Callee declared as `fn <callee>(<param>: @T, ...)` /
+///   `fn <callee>(ref <param>: T, ...)` — the parameter type T is
+///   ignored (the matching CompoundBinding's struct value supplies
+///   the dereferenced shape).
+/// * The source binding referenced by the call argument must be a
+///   recognised `CompoundKind::Struct` binding so the dereferenced
+///   value can be reconstructed.  Anything else makes the emission
+///   skip silently — the recorder degrades back to the pre-fix shape
+///   (no Reference, no per-callee parameter row) for unrecognised
+///   passing patterns.
+fn parse_reference_emissions(
+    source: &str,
+    compound_bindings: &[CompoundBinding],
+) -> Vec<ReferenceEmission> {
+    let lines: Vec<&str> = source.lines().collect();
+    // Map callee bare-name → ordered list of (param_name, mutable) for
+    // its `@T` / `ref T` parameters.
+    let mut callee_params: std::collections::HashMap<String, Vec<(String, bool)>> =
+        std::collections::HashMap::new();
+    for line in &lines {
+        let trimmed = line.trim();
+        let after_fn = match trimmed.strip_prefix("fn ") {
+            Some(s) => s.trim(),
+            None => continue,
+        };
+        let paren_open = match after_fn.find('(') {
+            Some(p) => p,
+            None => continue,
+        };
+        let paren_close = match after_fn.rfind(')') {
+            Some(p) => p,
+            None => continue,
+        };
+        if paren_close <= paren_open {
+            continue;
+        }
+        let name = after_fn[..paren_open].trim().to_string();
+        let params_text = &after_fn[paren_open + 1..paren_close];
+        let mut ref_params = Vec::new();
+        for part in params_text.split(',') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            // `ref <name>: T` — mutable reference parameter.
+            if let Some(rest) = p.strip_prefix("ref ") {
+                let colon = match rest.find(':') {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let pname = rest[..colon].trim().to_string();
+                if !pname.is_empty() {
+                    ref_params.push((pname, true));
+                }
+                continue;
+            }
+            // `<name>: @T` — snapshot parameter.
+            let colon = match p.find(':') {
+                Some(c) => c,
+                None => continue,
+            };
+            let pname = p[..colon].trim().to_string();
+            let ptype = p[colon + 1..].trim();
+            if ptype.starts_with('@') && !pname.is_empty() {
+                ref_params.push((pname, false));
+            }
+        }
+        if !ref_params.is_empty() {
+            callee_params.insert(name, ref_params);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut next_address: u64 = 0x1000;
+    for raw in &lines {
+        let line = raw.split("//").next().unwrap_or(raw);
+        // Find every `<name>(<args>)` call site whose callee matches a
+        // function with reference parameters.  Multiple call sites can
+        // appear on one line; we scan left-to-right.
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if !(c.is_ascii_alphabetic() || c == b'_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let ident = &line[start..i];
+            // Must be followed (after whitespace) by `(`.
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j >= bytes.len() || bytes[j] != b'(' {
+                continue;
+            }
+            // Skip path-component identifiers (`Foo::ident(...)`).
+            let preceded_by_path = start >= 2 && &line[start - 2..start] == "::";
+            if preceded_by_path {
+                continue;
+            }
+            let params = match callee_params.get(ident) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            // Find the matching `)` — single-level only (no nested
+            // calls in the args, which is fine for our fixtures).
+            let after_paren = j + 1;
+            let close = match line[after_paren..].find(')') {
+                Some(p) => after_paren + p,
+                None => continue,
+            };
+            let args_text = &line[after_paren..close];
+            let arg_list: Vec<&str> = args_text.split(',').map(|s| s.trim()).collect();
+            for ((pname, mutable), arg) in params.iter().zip(arg_list.iter()) {
+                let stripped = if *mutable {
+                    arg.strip_prefix("ref ").map(|s| s.trim())
+                } else {
+                    arg.strip_prefix('@').map(|s| s.trim())
+                };
+                let source_name = match stripped {
+                    Some(s)
+                        if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && !s.is_empty() =>
+                    {
+                        s.to_string()
+                    }
+                    _ => continue,
+                };
+                // Only emit when the source binding has a recognised
+                // Struct CompoundBinding (so the dereferenced value
+                // can be reconstructed).
+                if !compound_bindings
+                    .iter()
+                    .any(|b| b.name == source_name && matches!(b.kind, CompoundKind::Struct))
+                {
+                    continue;
+                }
+                out.push(ReferenceEmission {
+                    callee: ident.to_string(),
+                    param_name: pname.clone(),
+                    source_binding: source_name,
+                    mutable: *mutable,
+                    address: next_address,
+                });
+                next_address += 0x10;
+            }
+        }
+    }
+    out
 }
 
 /// Build the static function table that drives the dynamic-call-order

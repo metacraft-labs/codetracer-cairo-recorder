@@ -402,9 +402,24 @@ pub fn write_starknet_trace(
                 // event-log pane surfaces them as structured log records
                 // rather than synthetic stdout text.  This mirrors the
                 // EVM (1.39) routing for LOG-style events.
+                //
+                // M10 round-2: the multi-stream writer collapses the
+                // wider EventLogKind enum down to a 3-way IOEventKind
+                // and drops the `metadata` argument on the floor.  To
+                // make the canonical `StarknetEvent:<contract>` tag
+                // and the (`#[key]`-)indexed-vs-data distinction
+                // recoverable from the io_event payload alone, we
+                // embed the metadata in the content string itself —
+                // every consumer reads `text`, so this keeps the tag
+                // accessible without re-introducing the dropped
+                // metadata argument plumbing.
                 TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
                 let metadata = format!("StarknetEvent:{contract}");
-                let content = format!("keys=[{}] data=[{}]", keys.join(", "), data.join(", "));
+                let content = format!(
+                    "{metadata} keys=[{}] data=[{}]",
+                    keys.join(", "),
+                    data.join(", "),
+                );
                 TraceWriter::register_special_event(
                     &mut *writer,
                     EventLogKind::EvmEvent,
