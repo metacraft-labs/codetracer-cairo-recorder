@@ -4697,3 +4697,715 @@ fn test_component_test_via_ct_print_full() {
         ]
     );
 }
+
+// ===========================================================================
+// M10 round 5 — five additional fixtures pinning closures, the
+// `#[starknet::interface]` Dispatcher pattern, ECDSA signature checking,
+// implicit-arg passing (gas / syscall_ptr / segment-arena), and Cairo's
+// `#[test]` attribute.  Each fixture follows the same strict-`_via_ct_print_full`
+// shape: every assertion uses `assert_eq!` against an exact recorded shape
+// (counts, function tables, decoded JSON values).  No `contains`, no
+// source-text `assert!`, no soft `>=` checks — a regression flips the
+// exact tuple and fails the test loudly.
+// ===========================================================================
+
+// --- closure_test.cairo ---------------------------------------------------
+
+/// Records `closure_test.cairo`.  Pins the M10 round-5 closure
+/// surface: the inline closure bodies (`|x| x + 32`,
+/// `|x| x + bias`) and the `core::ops::FnOnce::call` corelib
+/// dispatch are inlined by the Sierra optimiser at the call sites,
+/// so the function table contains only the surrounding driver
+/// frames (`main`, `no_capture`, `with_capture`).  The closure-as-
+/// distinct-frame surfacing is a downstream M11 extension; this
+/// fixture pins the strict shape recorded today so a future
+/// closure-frame decoder lands as a *new* test variable rather than
+/// silently overwriting the current contract.
+#[test]
+fn test_closure_test_via_ct_print_full() {
+    let Some((doc, source_path)) =
+        record_and_dump_full("test_closure_test_via_ct_print_full", "closure_test.cairo")
+    else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → no_capture → with_capture.
+    // The closure bodies and the corelib `Fn::call` dispatch are
+    // inlined by the Sierra optimiser, so neither surfaces as its
+    // own frame.
+    assert_eq!(bare_fns, vec!["main", "no_capture", "with_capture"]);
+
+    // Type table: only the shared felt252 carrier — closures don't
+    // introduce a new typed surface today (the Fn-trait shape is
+    // erased by the inliner).  No `type_0` writer-side alias because
+    // the trace doesn't register any composite types.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252"]);
+
+    let counts = &doc["counts"];
+    // 12 step events: implicit start(1) + main body(3: 48, 39, 45) +
+    // no_capture body(3: 49, 37, 38) + with_capture body(4: 50, 42,
+    // 43, 44) + trailing return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(12), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 12 steps + 3 call_entry + 3 call_exit = 18 events.
+    assert_eq!(events.len(), 18, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "no_capture".to_string(),
+            "with_capture".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "no_capture".to_string(),
+            "with_capture".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // Per-binding kind sequence: today the recorder's source-level
+    // heuristic does not see through the closure inliner to the
+    // `let a = no_capture()` / `let bias = 32` / `let b =
+    // with_capture()` bindings, so step-level vars are empty.  Pin
+    // the empty kind list so a future closure-aware extension lands
+    // as a new test variable rather than silently changing the
+    // contract.
+    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+
+    // Per-callee call_exit return values: every closure-driver
+    // returns Void today because the closure call is inlined and the
+    // surrounding source-level let-binding heuristic doesn't recover
+    // the typed return.  Surfacing the Int return is a downstream
+    // M11 extension; pin the strict Void shape so the gap lands as
+    // a new test variable.
+    let exit_returns: Vec<(String, serde_json::Value)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns[0].0, "no_capture");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[1].0, "with_capture");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[2].0, "main");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
+}
+
+// --- interface_dispatcher_test (StarkNet trace) ---------------------------
+
+/// Records `interface_dispatcher_test_trace.json`.  Pins the M10
+/// round-5 `#[starknet::interface]` Dispatcher pattern: the host
+/// contract's external entry points (`check_balance`,
+/// `forward_transfer`) surface as their own call frames, and the
+/// dispatcher-mediated cross-contract invocations of `IToken`'s
+/// `balance_of` / `transfer` surface with the trait identity baked
+/// into both the function-table name (`IToken::<callee>::<selector>`)
+/// and a dedicated `dispatcher_trait` arg on the call entry.
+#[test]
+fn test_interface_dispatcher_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_interface_dispatcher_test_via_ct_print_full")
+    else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("interface_dispatcher_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse interface_dispatcher snforge trace");
+
+    // Sanity-check the parsed entry shape: 4 contract_call entries —
+    // direct call into host, dispatcher-mediated balance_of, direct
+    // call into host (forward_transfer), dispatcher-mediated
+    // transfer.
+    assert_eq!(entries.len(), 4, "expected 4 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // ----- Function table -------------------------------------------
+    // Direct calls keep the legacy `<callee>::<selector>` form;
+    // dispatcher-mediated calls carry the trait identity as the
+    // first segment so consumers can group all dispatch-mediated
+    // calls under the trait name without re-parsing.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "0xca11::check_balance",
+            "IToken::0xt0ken::balance_of",
+            "0xca11::forward_transfer",
+            "IToken::0xt0ken::transfer",
+        ]
+    );
+
+    // Type table: the shared felt252 carrier — no Reference type id
+    // because the fixture exercises only the dispatcher_trait path
+    // (no `self_kind` decorator).
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252"]);
+
+    let counts = &doc["counts"];
+    // 4 entries → 4 call frames + 4 register_step (one per entry) +
+    // implicit start() step at line 1 = 5 step events.  No
+    // storage_read / storage_write entries → 0 io_events.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(5), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 5 steps + 4 call_entry + 4 call_exit = 13 events.
+    assert_eq!(events.len(), 13, "events.len()");
+
+    // ----- Per-call dispatcher_trait arg shape -----------------------
+    // Walk every call_entry and surface the `dispatcher_trait` arg
+    // text when present.  Direct calls (check_balance,
+    // forward_transfer) MUST omit the arg; dispatcher-mediated calls
+    // (balance_of, transfer) MUST surface it as the trait name.
+    let dispatcher_args: Vec<(String, Option<String>)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let fn_name = e["function"].as_str().expect("function str").to_string();
+            let dispatcher_trait = e["args"]
+                .as_array()
+                .expect("call_entry.args array")
+                .iter()
+                .find(|a| a["varname"].as_str() == Some("dispatcher_trait"))
+                .map(|a| a["value"]["text"].as_str().unwrap_or("").to_string());
+            (fn_name, dispatcher_trait)
+        })
+        .collect();
+    assert_eq!(
+        dispatcher_args,
+        vec![
+            ("0xca11::check_balance".to_string(), None),
+            (
+                "IToken::0xt0ken::balance_of".to_string(),
+                Some("IToken".to_string()),
+            ),
+            ("0xca11::forward_transfer".to_string(), None),
+            (
+                "IToken::0xt0ken::transfer".to_string(),
+                Some("IToken".to_string()),
+            ),
+        ]
+    );
+
+    // ----- Per-call canonical caller / callee / selector / calldata -
+    // Pin the full args sequence per call so a regression in either
+    // the field-ordering or the args plumbing fails here loudly.
+    let arg_pairs: Vec<(String, Vec<(String, String)>)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let fn_name = e["function"].as_str().expect("function str").to_string();
+            let pairs: Vec<(String, String)> = e["args"]
+                .as_array()
+                .expect("call_entry.args array")
+                .iter()
+                .filter_map(|a| {
+                    let name = a["varname"].as_str()?.to_string();
+                    if a["value"]["kind"].as_str() == Some("String") {
+                        Some((name, a["value"]["text"].as_str()?.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (fn_name, pairs)
+        })
+        .collect();
+    assert_eq!(
+        arg_pairs,
+        vec![
+            (
+                "0xca11::check_balance".to_string(),
+                vec![
+                    ("caller".to_string(), "0x1".to_string()),
+                    ("callee".to_string(), "0xca11".to_string()),
+                    ("selector".to_string(), "check_balance".to_string()),
+                    ("calldata0".to_string(), "0xa11ce".to_string()),
+                ],
+            ),
+            (
+                "IToken::0xt0ken::balance_of".to_string(),
+                vec![
+                    ("caller".to_string(), "0xca11".to_string()),
+                    ("callee".to_string(), "0xt0ken".to_string()),
+                    ("selector".to_string(), "balance_of".to_string()),
+                    ("calldata0".to_string(), "0xa11ce".to_string()),
+                    ("dispatcher_trait".to_string(), "IToken".to_string()),
+                ],
+            ),
+            (
+                "0xca11::forward_transfer".to_string(),
+                vec![
+                    ("caller".to_string(), "0x1".to_string()),
+                    ("callee".to_string(), "0xca11".to_string()),
+                    ("selector".to_string(), "forward_transfer".to_string()),
+                    ("calldata0".to_string(), "0xb0b".to_string()),
+                    ("calldata1".to_string(), "100".to_string()),
+                ],
+            ),
+            (
+                "IToken::0xt0ken::transfer".to_string(),
+                vec![
+                    ("caller".to_string(), "0xca11".to_string()),
+                    ("callee".to_string(), "0xt0ken".to_string()),
+                    ("selector".to_string(), "transfer".to_string()),
+                    ("calldata0".to_string(), "0xb0b".to_string()),
+                    ("calldata1".to_string(), "100".to_string()),
+                    ("dispatcher_trait".to_string(), "IToken".to_string()),
+                ],
+            ),
+        ]
+    );
+}
+
+// --- ecdsa_test (StarkNet trace) ------------------------------------------
+
+/// Records `ecdsa_test_trace.json`.  Pins the M10 round-5
+/// `check_ecdsa_signature` syscall surface: the syscall surfaces as
+/// a `<contract>::check_ecdsa_signature` Call/Return pair (deduped
+/// in the function table when invoked twice), and the boolean
+/// result decodes as a typed `ValueRecord::Bool` on the
+/// `call_exit.return_value`.  The fixture exercises both `true` and
+/// `false` returns so the round-trip through the JSON's
+/// `"true"` / `"false"` strings is pinned.
+#[test]
+fn test_ecdsa_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_ecdsa_test_via_ct_print_full") else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("ecdsa_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse ecdsa snforge trace");
+
+    // Sanity-check the parsed entry shape: two syscall entries —
+    // one returning true, one returning false.
+    assert_eq!(entries.len(), 2, "expected 2 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // ----- Function table — single deduped entry (both syscall
+    // entries share the same name).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(functions, vec!["0xec5a::check_ecdsa_signature"]);
+
+    // Type table: shared felt252 (str carrier) plus the dedicated
+    // bool type id the converter registers for the
+    // ValueRecord::Bool return.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "bool"]);
+
+    let counts = &doc["counts"];
+    // 2 syscalls → 2 call frames + 2 register_step (one per entry) +
+    // implicit start() step at line 1 = 3 step events.  Syscalls
+    // don't emit io_events.
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(3), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 3 steps + 2 call_entry + 2 call_exit = 7 events.
+    assert_eq!(events.len(), 7, "events.len()");
+
+    // ----- Per-syscall return-value shape ---------------------------
+    // Strict pin: each call_exit carries the syscall's boolean
+    // return value as a typed `ValueRecord::Bool`.  The first call
+    // returns true (signature valid), the second returns false
+    // (signature invalid).
+    let exit_returns: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            (
+                e["function"].as_str().expect("function str").to_string(),
+                e["return_value"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 2, "expected 2 call_exit events");
+    assert_eq!(exit_returns[0].0, "0xec5a::check_ecdsa_signature");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Bool"));
+    assert_eq!(exit_returns[0].1["b"].as_bool(), Some(true));
+    assert_eq!(exit_returns[1].0, "0xec5a::check_ecdsa_signature");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Bool"));
+    assert_eq!(exit_returns[1].1["b"].as_bool(), Some(false));
+}
+
+// --- implicits_test.cairo -------------------------------------------------
+
+/// Records `implicits_test.cairo`.  Pins the M10 round-5 implicit-
+/// arg surface: implicit arguments threaded through the Sierra ABI
+/// (Pedersen for `pedersen()`, RangeCheck for u32 arithmetic,
+/// SegmentArena / GasBuiltin for `Felt252Dict` allocation) do NOT
+/// surface separately on the call_entry — the source-level recorder
+/// doesn't reconstruct the implicit-vs-explicit distinction from
+/// the user-visible function signature.  What the trace today
+/// contains is the user-visible function frames (`main`, `compute`)
+/// and the explicit `h` let-binding from the source's let-binding
+/// shape; the synthetic implicit-arg surfacing is a downstream M11
+/// extension.  This fixture pins the strict shape recorded today
+/// so a future implicit-aware extension lands as a *new* test
+/// variable rather than silently overwriting the current contract.
+#[test]
+fn test_implicits_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_implicits_test_via_ct_print_full",
+        "implicits_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → compute.  The `pedersen()`
+    // / `Felt252Dict::insert` / `Felt252Dict::get` corelib dispatch
+    // is inlined by the Sierra optimiser, so neither surfaces as
+    // its own frame — and neither do the implicit-arg threads.
+    assert_eq!(bare_fns, vec!["main", "compute"]);
+
+    // Type table: shared felt252 carrier and its writer-side alias —
+    // the implicit args (Pedersen / RangeCheck / SegmentArena /
+    // GasBuiltin pointers) are not surfaced as their own typed
+    // shapes today.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "type_0"]);
+
+    let counts = &doc["counts"];
+    // 10 step events: implicit start(1) + main body(2: 44, 45) +
+    // compute body(6: 35, 36, 37, 38, 39, 40) + trailing
+    // return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 10 steps + 2 call_entry + 2 call_exit = 14 events.
+    assert_eq!(events.len(), 14, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "compute".to_string()]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["compute".to_string(), "main".to_string()]
+    );
+
+    // Per-binding kind sequence: only the `h` Pedersen binding (Int)
+    // and the trailing `return_value` (Int) — the `widened` u32
+    // binding and the `_v` discard binding don't surface because
+    // the recorder's source-level heuristic drops `_`-prefixed
+    // discards and the u32 widening is inlined by the optimiser.
+    // Pin the kinds list explicitly so a future implicit-aware
+    // extension lands as a new entry rather than silently changing
+    // the contract.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("h".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // Per-callee call_exit return values: both `compute` and `main`
+    // return felt252 values that the source-level let-binding
+    // heuristic recovers from `var_values`; today the pedersen
+    // output isn't surfaced as a real felt (the VM-side felt
+    // doesn't fit in i64 and decodes to 0 — the strict pin records
+    // the shape the recorder emits today, not a hypothetical
+    // big-int decoded value).
+    let exit_returns: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 2);
+    assert_eq!(exit_returns[0].0, "compute");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
+    assert_eq!(exit_returns[1].0, "main");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[1].1["i"].as_i64(), Some(0));
+}
+
+// --- cairo_test_attribute_test.cairo --------------------------------------
+
+/// Records `cairo_test_attribute_test.cairo`.  Pins the M10 round-5
+/// Cairo `#[test]` attribute surface (documented gap): the recorder
+/// does NOT link the cairo-test plugin, so source-level `#[test]`
+/// attributes don't compile in the in-process Sierra runner.  The
+/// fixture instead defines `add_test` / `sub_test` / `mul_test` as
+/// regular `fn` and a `main` driver that invokes each in sequence —
+/// the strict pin asserts every helper surfaces as its own
+/// Function entry with balanced Call/Return events, exactly the
+/// shape a future test-plugin integration would build on.
+#[test]
+fn test_cairo_test_attribute_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_cairo_test_attribute_test_via_ct_print_full",
+        "cairo_test_attribute_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → add_test → sub_test →
+    // mul_test.  Each `#[test]`-shaped helper surfaces as its own
+    // function frame.
+    assert_eq!(
+        bare_fns,
+        vec!["main", "add_test", "sub_test", "mul_test"]
+    );
+
+    // Type table: only the shared felt252 carrier — every helper
+    // returns a felt252 and no composite types are constructed.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252"]);
+
+    let counts = &doc["counts"];
+    // 18 step events: implicit start(1) + main body(4: 46, 31, 37,
+    // 43) + add_test body(4: 47, 28, 29, 30) + sub_test body(4: 48,
+    // 34, 35, 36) + mul_test body(4: 49, 40, 41, 42) + trailing
+    // return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(18), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 18 steps + 4 call_entry + 4 call_exit = 26 events.
+    assert_eq!(events.len(), 26, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "add_test".to_string(),
+            "sub_test".to_string(),
+            "mul_test".to_string(),
+        ]
+    );
+    // LIFO close: each helper closes before the next opens (callees
+    // don't nest), and main closes last after all three helpers.
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "add_test".to_string(),
+            "sub_test".to_string(),
+            "mul_test".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // Per-binding kind sequence: today the recorder's source-level
+    // heuristic does not surface the `let s = add_test()` /
+    // `let d = sub_test()` / `let m = mul_test()` bindings as
+    // step variables (the synthetic test helpers' return values
+    // are not fed back into `var_values` because their return
+    // expression `a + b` is not a let-binding the heuristic sees).
+    // Pin the empty kind list so a future cairo-test-aware
+    // extension lands as a new test variable rather than silently
+    // changing the contract.
+    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+
+    // Per-callee call_exit return values: every helper returns Void
+    // today because the recorder's source-level let-binding
+    // heuristic doesn't recover the typed return for these helper
+    // shapes.  Surfacing the Int return is a downstream M11
+    // extension (mirrors the closure_test pattern); pin the strict
+    // Void shape so the gap lands as a new test variable.
+    let exit_returns: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 4);
+    assert_eq!(exit_returns[0].0, "add_test");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[1].0, "sub_test");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[2].0, "mul_test");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[3].0, "main");
+    assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
+}

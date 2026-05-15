@@ -1,0 +1,36 @@
+{
+  "test_name": "test_interface_dispatcher",
+  "contract_address": "0xca11",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xca11",
+      "selector": "check_balance",
+      "calldata": ["0xa11ce"]
+    },
+    {
+      "type": "contract_call",
+      "caller": "0xca11",
+      "callee": "0xt0ken",
+      "selector": "balance_of",
+      "calldata": ["0xa11ce"],
+      "dispatcher_trait": "IToken"
+    },
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xca11",
+      "selector": "forward_transfer",
+      "calldata": ["0xb0b", "100"]
+    },
+    {
+      "type": "contract_call",
+      "caller": "0xca11",
+      "callee": "0xt0ken",
+      "selector": "transfer",
+      "calldata": ["0xb0b", "100"],
+      "dispatcher_trait": "IToken"
+    }
+  ]
+}
