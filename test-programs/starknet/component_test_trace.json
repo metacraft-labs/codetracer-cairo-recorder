@@ -1,0 +1,33 @@
+{
+  "test_name": "test_component_ownable",
+  "contract_address": "0xc0de",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xc0de",
+      "selector": "ownable_component::owner",
+      "calldata": []
+    },
+    {
+      "type": "storage_read",
+      "contract": "0xc0de",
+      "key": "ownable_component::owner",
+      "value": "0xa11ce"
+    },
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xc0de",
+      "selector": "ownable_component::transfer_ownership",
+      "calldata": ["0xb0b"]
+    },
+    {
+      "type": "storage_write",
+      "contract": "0xc0de",
+      "key": "ownable_component::owner",
+      "old_value": "0xa11ce",
+      "new_value": "0xb0b"
+    }
+  ]
+}

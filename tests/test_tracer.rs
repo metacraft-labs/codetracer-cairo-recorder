@@ -3892,3 +3892,808 @@ fn test_syscalls_test_via_ct_print_full() {
         Some("0x00000000000000000000000000000000000000000000000000000000feedface")
     );
 }
+
+// ===========================================================================
+// M10 round 4 — five additional fixtures pinning ByteArray + felt252 short
+// strings, Felt252Dict<T>, hash builtins (pedersen / poseidon), StarkNet
+// visibility decorators (`#[external(v0)]` / `#[view]` / internal), and
+// `#[starknet::component]` reusable behaviour modules.  Each fixture
+// follows the same strict-`_via_ct_print_full` shape: every assertion
+// uses `assert_eq!` against an exact recorded shape (counts, function
+// tables, decoded JSON values).  No `contains`, no source-text
+// `assert!`, no soft `>=` checks — a regression flips the exact tuple
+// and fails the test loudly.
+// ===========================================================================
+
+// --- byte_array_short_string_test.cairo -----------------------------------
+
+/// Records `byte_array_short_string_test.cairo`.  Pins the M10 round-4
+/// short-string + ByteArray surface: the felt-encoded short string
+/// `'STX_OK'` surfaces as a scalar `ValueRecord::Int` whose `i` field
+/// matches the canonical big-endian ASCII encoding
+/// (`0x53_54_58_5F_4F_4B = 91621724999499`); the `_greeting`
+/// ByteArray binding does not yet surface as a typed Struct (the
+/// recorder's source-level heuristic recognises scalar / Sequence /
+/// Tuple / Struct-literal / Variant shapes only) but the call/return
+/// frame for `make_greeting()` is captured and surfaces with a `Void`
+/// return — pinning the gap so a future ByteArray decoder lands as a
+/// new test variable rather than silently overwriting the current
+/// contract.
+#[test]
+fn test_byte_array_short_string_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_byte_array_short_string_test_via_ct_print_full",
+        "byte_array_short_string_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → make_greeting → make_tag.
+    assert_eq!(bare_fns, vec!["main", "make_greeting", "make_tag"]);
+
+    // Type table: only the shared felt252 carrier and its writer-side
+    // alias — neither ByteArray nor short-string add new lang_types
+    // (short strings ride on felt252; ByteArray surfacing is a
+    // downstream M11 extension).
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "type_0"]);
+
+    let counts = &doc["counts"];
+    // 9 step events: implicit start(1) + main body steps(2: 31, 34) +
+    // make_greeting body(2: 32, 23) + make_tag body(2: 33, 27) +
+    // main resume(1: 34) + trailing return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(9), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 9 steps + 3 call_entry + 3 call_exit = 15 events.
+    assert_eq!(events.len(), 15, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "make_greeting".to_string(),
+            "make_tag".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "make_greeting".to_string(),
+            "make_tag".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // Per-binding kind sequence: only `tag` (the short-string Int)
+    // and the trailing `return_value` (Int) — the `_greeting` ByteArray
+    // binding is *not* surfaced by the current recorder because the
+    // source-level heuristic does not yet model ByteArray's struct
+    // shape.  Pinning the kinds list explicitly so a future
+    // ByteArray-emitting recorder lands as a new entry rather than
+    // silently changing the contract.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("tag".to_string(), "Int".to_string()),
+            ("return_value".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // The short-string `'STX_OK'` decodes as the canonical big-endian
+    // felt252 encoding of the six ASCII bytes `S T X _ O K` =
+    // 0x53_54_58_5F_4F_4B = 91621724999499.  This is the strict pin
+    // the spec is after: a felt252 short-string surfaces as a scalar
+    // Int with the printable ASCII recoverable from the big-endian
+    // byte representation of `i`.
+    let tag = find_var_value(&doc, "tag").expect("tag var");
+    assert_eq!(tag["kind"].as_str(), Some("Int"));
+    assert_eq!(tag["i"].as_i64(), Some(91_621_724_999_499));
+    // Big-endian-byte recovery: stripping the leading zero bytes from
+    // the i64 representation must yield the printable ASCII of the
+    // source short-string.
+    let i = tag["i"].as_i64().expect("tag.i");
+    let mut bytes = i.to_be_bytes().to_vec();
+    while bytes.first() == Some(&0u8) {
+        bytes.remove(0);
+    }
+    assert_eq!(bytes, b"STX_OK".to_vec());
+
+    // Per-callee call_exit return values:
+    //   * make_greeting returns ByteArray — the recorder's source-level
+    //     return-value heuristic doesn't recover felts from a
+    //     ByteArray-typed return, so the exit value surfaces as Void.
+    //   * make_tag returns the short-string Int 91621724999499.
+    //   * main returns the short-string Int (delegating make_tag's
+    //     return through the trailing tail expression).
+    let exit_returns: Vec<(String, serde_json::Value)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns[0].0, "make_greeting");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[1].0, "make_tag");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[1].1["i"].as_i64(), Some(91_621_724_999_499));
+    assert_eq!(exit_returns[2].0, "main");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[2].1["i"].as_i64(), Some(91_621_724_999_499));
+}
+
+// --- felt252_dict_test.cairo ----------------------------------------------
+
+/// Records `felt252_dict_test.cairo`.  Pins the M10 round-4
+/// `Felt252Dict<T>` surface: the corelib dispatch into
+/// `Felt252DictTrait::insert` / `Felt252DictTrait::get` is *inlined*
+/// by the Sierra optimiser at the call sites — so the function table
+/// contains only the driver-side frames (`main` + `use_dict`), but
+/// the value the driver inserted under `'alice'` (`100_u32`) flows
+/// through `use_dict()`'s u32 return and surfaces on the
+/// `call_exit.return_value` of `use_dict` as a typed
+/// `ValueRecord::Int`.  The recorder does not yet emit a synthetic
+/// `SquashedFelt252Dict` step variable — surfacing that final
+/// entry-list snapshot is a downstream M11 extension; this fixture
+/// pins the strict shape recorded today so it lands as a new test
+/// variable rather than silently overwriting the current contract.
+#[test]
+fn test_felt252_dict_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_felt252_dict_test_via_ct_print_full",
+        "felt252_dict_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → use_dict.  The corelib
+    // Felt252DictTrait::{insert,get} dispatch is inlined by the
+    // Sierra optimiser, so neither surfaces as its own frame.
+    assert_eq!(bare_fns, vec!["main", "use_dict"]);
+
+    // Type table: only the shared felt252 carrier and its writer-side
+    // alias — Felt252Dict's typed inner state isn't surfaced yet.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "type_0"]);
+
+    let counts = &doc["counts"];
+    // 10 step events: implicit start(1) + main body(2: 34, 36) +
+    // use_dict body(6: 35, 26-30) + trailing return_value step(1).
+    assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 10 steps + 2 call_entry + 2 call_exit = 14 events.
+    assert_eq!(events.len(), 14, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "use_dict".to_string(),]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["use_dict".to_string(), "main".to_string(),]
+    );
+
+    // Per-binding kind sequence: only the `v` u32 binding (the typed
+    // dict.get('alice') return) surfaces.  The dict literal itself
+    // (`d`), the inserted values (100, 200), and the
+    // SquashedFelt252Dict snapshot are *not* surfaced — pinning the
+    // gap so a future dict-state recorder lands as a new entry.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![("v".to_string(), "Int".to_string()),]
+    );
+
+    // The `v` binding decodes to 100 — the value the driver inserted
+    // under the `'alice'` key.  Pinning both the value and the
+    // typed-Int kind so a regression in dict-return recovery fails
+    // here loudly.
+    let v = find_var_value(&doc, "v").expect("v var");
+    assert_eq!(v["kind"].as_str(), Some("Int"));
+    assert_eq!(v["i"].as_i64(), Some(100));
+
+    // Per-callee call_exit return values:
+    //   * use_dict returns u32 100 — the recovered dict.get('alice').
+    //   * main returns felt252 (`r.into()`) — the recorder's
+    //     source-level return-value heuristic doesn't yet model
+    //     `<u32>.into()` so main's exit surfaces as Void.
+    let exit_returns: Vec<(String, serde_json::Value)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 2);
+    assert_eq!(exit_returns[0].0, "use_dict");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[0].1["i"].as_i64(), Some(100));
+    assert_eq!(exit_returns[1].0, "main");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
+}
+
+// --- hash_builtins_test.cairo ---------------------------------------------
+
+/// Records `hash_builtins_test.cairo`.  Pins the M10 round-4 hash
+/// builtin surface: each driver-side function (`use_pedersen`,
+/// `use_poseidon`) surfaces as a Call/Return frame with the inlined
+/// corelib dispatch into `pedersen::pedersen` /
+/// `poseidon::hades_permutation` happening inside the body — the
+/// Sierra optimiser folds the corelib trampoline into the caller, so
+/// the hash builtin itself does not surface as its own frame.  The
+/// strict pin is on the function table (driver-side only), the
+/// call-entry / call-exit DFS / LIFO order, and the typed-Int return
+/// value of `use_pedersen` (the recorder's source-level heuristic
+/// recovers the `let h = pedersen(...)` binding as a scalar Int with
+/// value 0 — the actual pedersen hash exceeds i64 range so the felt
+/// surfaces as 0 today; pinning the value-as-recorded so a future
+/// felt252-aware decoder lands as a new test variable rather than
+/// silently overwriting the current contract).
+#[test]
+fn test_hash_builtins_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_hash_builtins_test_via_ct_print_full",
+        "hash_builtins_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order from main: main → use_pedersen → use_poseidon.
+    // The corelib pedersen / hades_permutation dispatch is inlined by
+    // the Sierra optimiser, so neither surfaces as its own frame.
+    assert_eq!(bare_fns, vec!["main", "use_pedersen", "use_poseidon"]);
+
+    // Type table: only the shared felt252 carrier and its writer-side
+    // alias — neither pedersen output (felt252) nor hades_permutation
+    // tuple-return adds new lang_types.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "type_0"]);
+
+    let counts = &doc["counts"];
+    // 11 step events: implicit start(1) + main body(3: 51, 52, 53) +
+    // use_pedersen body(2: 41, 42) + use_poseidon body(2: 46, 47) +
+    // main resume(2: 48 + trailing return_value step at 54) =
+    // 1+3+2+2+1+2 = 11.
+    assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 11 steps + 3 call_entry + 3 call_exit = 17 events.
+    assert_eq!(events.len(), 17, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "use_pedersen".to_string(),
+            "use_poseidon".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "use_pedersen".to_string(),
+            "use_poseidon".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // Per-binding kind sequence: only `h` (the use_pedersen-local Int
+    // binding for the pedersen output) surfaces as a step variable.
+    // The destructured `(s0, _s1, _s2)` tuple from hades_permutation
+    // does not surface today — pinning the gap so a future
+    // hash-tuple-aware decoder lands as new entries.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![("h".to_string(), "Int".to_string()),]
+    );
+
+    // The `h` binding decodes to 0: the actual pedersen(1, 2) output
+    // exceeds i64 range so the recorder's source-level
+    // return-value heuristic does not recover the real value and
+    // falls back to 0.  Pinning the value-as-recorded so a future
+    // felt252-aware decoder surfaces a new entry rather than
+    // silently changing the contract.
+    let h = find_var_value(&doc, "h").expect("h var");
+    assert_eq!(h["kind"].as_str(), Some("Int"));
+    assert_eq!(h["i"].as_i64(), Some(0));
+
+    // Per-callee call_exit return values:
+    //   * use_pedersen returns felt252 — surfaces as Int 0 (the
+    //     bound `h` value, propagated by the source-level heuristic).
+    //   * use_poseidon returns felt252 from a tuple destructure
+    //     (`let (s0, _, _) = ...; s0`) — the heuristic doesn't model
+    //     tuple destructure for return-value recovery, so the exit
+    //     surfaces as Void.
+    //   * main returns felt252 (`p + q`) — the heuristic doesn't
+    //     model arithmetic-expression returns, so main's exit also
+    //     surfaces as Void.
+    let exit_returns: Vec<(String, serde_json::Value)> = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("call_exit.function str")
+                .rsplit("::")
+                .next()
+                .expect("non-empty function name")
+                .to_string();
+            (name, e["return_value"].clone())
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns[0].0, "use_pedersen");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
+    assert_eq!(exit_returns[1].0, "use_poseidon");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
+    assert_eq!(exit_returns[2].0, "main");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
+}
+
+// --- visibility_decorators_test (StarkNet trace) --------------------------
+
+/// Records `visibility_decorators_test_trace.json`.  Pins the M10
+/// round-4 visibility-decorator surface: each StarkNet `contract_call`
+/// JSON entry now carries an optional `visibility` field (`"external"`
+/// / `"view"` / `"internal"`) and an optional `self_kind` field
+/// (`"ref"` / `"snapshot"`).  The converter writes the function name
+/// as `<visibility>::<contract>::<selector>` so the function table
+/// groups external / view / internal methods, and emits a typed
+/// `ValueRecord::Reference` `self_kind` arg whose `mutable` flag is
+/// `true` for `ref self` (external) and `false` for `@self` (view).
+/// Internal callers omit the `self_kind` field so the arg is dropped
+/// — pinning that the recorder keeps the @-vs-ref distinction visible
+/// at the trace level.
+#[test]
+fn test_visibility_decorators_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_visibility_decorators_test_via_ct_print_full")
+    else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("visibility_decorators_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse visibility_decorators snforge trace");
+
+    // Sanity-check the parsed entry shape: three contract_call
+    // entries, one per visibility class.
+    assert_eq!(entries.len(), 3, "expected 3 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // Function table: one entry per visibility class, prefixed with
+    // the visibility tag so consumers can group methods without
+    // re-parsing the contract source.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "external::0xbabe::deposit",
+            "internal::0xbabe::validate",
+            "view::0xbabe::balance_of",
+        ]
+    );
+
+    // Type table: shared felt252 (the snforge str carrier) plus the
+    // dedicated `Self` type id the converter registers for the
+    // ValueRecord::Reference `self_kind` args.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "Self"]);
+
+    let counts = &doc["counts"];
+    // 3 entries → 3 call frames + 3 register_step (one per entry) +
+    // implicit start() step at line 1 = 4 step events.  No
+    // storage_read / storage_write entries → 0 io_events.
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(4), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 4 steps + 3 call_entry + 3 call_exit = 10 events.
+    assert_eq!(events.len(), 10, "events.len()");
+
+    // ----- Per-call self_kind arg shape ------------------------------
+    // Walk the call_entry events in source order and extract the
+    // `self_kind` arg's typed shape: external surfaces as Reference
+    // mutable=true; view surfaces as Reference mutable=false;
+    // internal omits the arg entirely.
+    let self_kinds: Vec<(String, Option<bool>)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let fn_name = e["function"].as_str().expect("function str").to_string();
+            let self_kind = e["args"]
+                .as_array()
+                .expect("call_entry.args array")
+                .iter()
+                .find(|a| a["varname"].as_str() == Some("self_kind"))
+                .map(|a| {
+                    assert_eq!(
+                        a["value"]["kind"].as_str(),
+                        Some("Reference"),
+                        "self_kind must surface as Reference; got {}",
+                        a["value"]
+                    );
+                    a["value"]["mutable"]
+                        .as_bool()
+                        .expect("Reference.mutable bool")
+                });
+            (fn_name, self_kind)
+        })
+        .collect();
+    assert_eq!(
+        self_kinds,
+        vec![
+            ("external::0xbabe::deposit".to_string(), Some(true)),
+            ("internal::0xbabe::validate".to_string(), None),
+            ("view::0xbabe::balance_of".to_string(), Some(false)),
+        ]
+    );
+
+    // ----- Calldata still flows through the canonical `args`
+    //       channel.  Pin the deposit's `calldata0` and the
+    //       validate's `calldata0` so a regression in the args
+    //       routing fails here loudly.
+    let arg_pairs: Vec<(String, Vec<(String, String)>)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let fn_name = e["function"].as_str().expect("function str").to_string();
+            let pairs: Vec<(String, String)> = e["args"]
+                .as_array()
+                .expect("call_entry.args array")
+                .iter()
+                .filter_map(|a| {
+                    let name = a["varname"].as_str()?.to_string();
+                    if a["value"]["kind"].as_str() == Some("String") {
+                        Some((name, a["value"]["text"].as_str()?.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (fn_name, pairs)
+        })
+        .collect();
+    assert_eq!(
+        arg_pairs,
+        vec![
+            (
+                "external::0xbabe::deposit".to_string(),
+                vec![
+                    ("caller".to_string(), "0x1".to_string()),
+                    ("callee".to_string(), "0xbabe".to_string()),
+                    ("selector".to_string(), "deposit".to_string()),
+                    ("calldata0".to_string(), "50".to_string()),
+                ],
+            ),
+            (
+                "internal::0xbabe::validate".to_string(),
+                vec![
+                    ("caller".to_string(), "0xbabe".to_string()),
+                    ("callee".to_string(), "0xbabe".to_string()),
+                    ("selector".to_string(), "validate".to_string()),
+                    ("calldata0".to_string(), "50".to_string()),
+                ],
+            ),
+            (
+                "view::0xbabe::balance_of".to_string(),
+                vec![
+                    ("caller".to_string(), "0x1".to_string()),
+                    ("callee".to_string(), "0xbabe".to_string()),
+                    ("selector".to_string(), "balance_of".to_string()),
+                ],
+            ),
+        ]
+    );
+}
+
+// --- component_test (StarkNet trace) --------------------------------------
+
+/// Records `component_test_trace.json`.  Pins the M10 round-4
+/// `#[starknet::component]` surface: a host contract embeds a reusable
+/// component module via `component!(path: ownable_component, ...)`,
+/// and every component-internal call surfaces with the component's
+/// module path baked into the selector
+/// (`ownable_component::transfer_ownership`).  The component's
+/// storage reads / writes carry the component path in the storage
+/// key (`ownable_component::owner`) so consumers can distinguish a
+/// host-level slot from a component-embedded slot at the same
+/// physical storage offset.
+#[test]
+fn test_component_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_component_test_via_ct_print_full") else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("component_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse component snforge trace");
+
+    // Sanity-check the parsed entry shape: 1 contract_call (owner) +
+    // 1 storage_read + 1 contract_call (transfer_ownership) +
+    // 1 storage_write = 4 entries.
+    assert_eq!(entries.len(), 4, "expected 4 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // Function table: each contract_call's selector carries the
+    // component's module path so the function table surfaces the
+    // component-prefixed names directly.  Storage read / write
+    // entries are emitted as `<contract>::storage_read` /
+    // `<contract>::storage_write` frames as usual — the
+    // component-prefixing lives on the *key* arg (asserted below).
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "0xc0de::ownable_component::owner",
+            "0xc0de::storage_read",
+            "0xc0de::ownable_component::transfer_ownership",
+            "0xc0de::storage_write",
+        ]
+    );
+
+    let counts = &doc["counts"];
+    // 4 entries → 4 call frames + 4 register_step (one per entry) +
+    // implicit start() step at line 1 = 5 step events.  Each
+    // storage_read / storage_write entry emits one io_event = 2
+    // io_events total.
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(5), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(2),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 5 steps + 4 call_entry + 4 call_exit + 2 io_events = 15 events.
+    assert_eq!(events.len(), 15, "events.len()");
+
+    // ----- io_event sequence -----------------------------------------
+    // The two storage entries surface as Read+Write tagged io_events
+    // whose `text` field carries `<contract>:<key>=<value(s)>` —
+    // pinning that the component-prefixed key flows through the
+    // storage io_event content unchanged.
+    let io_events: Vec<&serde_json::Value> = events.iter().filter(|e| e["kind"] == "io").collect();
+    assert_eq!(io_events.len(), 2);
+    let io_pairs: Vec<(String, String)> = io_events
+        .iter()
+        .map(|e| {
+            (
+                e["io_kind"].as_str().unwrap_or("").to_string(),
+                e["text"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        io_pairs,
+        vec![
+            (
+                "ioFileOp".to_string(),
+                "0xc0de:ownable_component::owner=0xa11ce".to_string(),
+            ),
+            (
+                "ioStdout".to_string(),
+                "0xc0de:ownable_component::owner=0xa11ce->0xb0b".to_string(),
+            ),
+        ]
+    );
+
+    // ----- Per-call selector arg pin ---------------------------------
+    // Walk every call_entry and extract the `selector` / `key` arg
+    // values so a regression that drops the component prefix from
+    // either the selector or the storage key fails here loudly.  Only
+    // the component-internal selectors / keys are exercised in this
+    // fixture — both contract_calls and the storage entries carry
+    // the `ownable_component::owner` shape.
+    let key_or_selector: Vec<(String, String)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let fn_name = e["function"].as_str().expect("function str").to_string();
+            // Each call_entry's args carries either a `selector` or a
+            // `key` arg — the converter emits one or the other
+            // depending on whether the source entry was a
+            // contract_call or a storage_{read,write}.  Surface
+            // whichever is present.
+            let arg_value = e["args"]
+                .as_array()
+                .expect("call_entry.args array")
+                .iter()
+                .find(|a| {
+                    let n = a["varname"].as_str();
+                    n == Some("selector") || n == Some("key")
+                })
+                .map(|a| a["value"]["text"].as_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            (fn_name, arg_value)
+        })
+        .collect();
+    assert_eq!(
+        key_or_selector,
+        vec![
+            (
+                "0xc0de::ownable_component::owner".to_string(),
+                "ownable_component::owner".to_string(),
+            ),
+            (
+                "0xc0de::storage_read".to_string(),
+                "ownable_component::owner".to_string(),
+            ),
+            (
+                "0xc0de::ownable_component::transfer_ownership".to_string(),
+                "ownable_component::transfer_ownership".to_string(),
+            ),
+            (
+                "0xc0de::storage_write".to_string(),
+                "ownable_component::owner".to_string(),
+            ),
+        ]
+    );
+}
