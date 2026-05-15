@@ -3469,12 +3469,11 @@ fn test_trait_impl_test_via_ct_print_full() {
 ///   shared `Array<felt252>` type id.
 /// * `view` — the slice-view binding from `xs.span()` as a
 ///   `ValueRecord::Sequence` against a dedicated `Span<felt252>`
-///   type id.  The `is_slice` field stays `false` because the Nim
-///   writer's FFI drops that discriminator on the boundary (see
-///   `is_slice: _,` in
-///   `codetracer_trace_writer_nim/src/lib.rs`); the dedicated type
-///   id is the recorder's distinguishing carrier until the FFI gap
-///   is closed.
+///   type id and `is_slice = true`.  The Nim writer's FFI now
+///   threads the discriminator through
+///   `ct_value_begin_sequence_with_slice`, so the slice/owned split
+///   surfaces both via the dedicated type id and via the field-level
+///   `is_slice` flag.
 ///
 /// The recorder does NOT yet propagate the Span carrier into the
 /// callee's `items` parameter binding; that's a round-4 concern.
@@ -3590,12 +3589,11 @@ fn test_span_test_via_ct_print_full() {
     // ----- Strict shape for the Span view `view` ---------------------
     let view_value = find_var_value(&doc, "view").expect("view step variable");
     assert_eq!(view_value["kind"].as_str(), Some("Sequence"));
-    // FFI gap: `is_slice` rides as `false` regardless of what the
-    // recorder sets — see the doc-comment on `build_span_value` in
-    // `src/tracer.rs`.  The dedicated `Span<felt252>` type_id (slot 2
-    // in the types table) is the recorder's slice-vs-owned
-    // discriminator until the FFI gap is closed.
-    assert_eq!(view_value["is_slice"].as_bool(), Some(false));
+    // The recorder pins `Span<felt252>` to slice/view semantics; the
+    // FFI now threads the discriminator end-to-end via
+    // `ct_value_begin_sequence_with_slice`, so the field-level
+    // `is_slice` flag matches the dedicated `Span<felt252>` type id.
+    assert_eq!(view_value["is_slice"].as_bool(), Some(true));
     assert_eq!(view_value["type_id"].as_u64(), Some(2));
     let view_elements: Vec<i64> = view_value["elements"]
         .as_array()

@@ -900,16 +900,13 @@ impl CairoTracer {
     /// slice-view binding.  Elements come from the source Array
     /// CompoundBinding.
     ///
-    /// FFI-gap pin: the Nim writer's `encode_recursive` arm for
-    /// `ValueRecord::Sequence` currently drops the `is_slice` discriminator
-    /// on the FFI boundary (see `is_slice: _,` in
-    /// `codetracer_trace_writer_nim/src/lib.rs`), so a slice tag set to
-    /// `true` here would not survive the round-trip.  Until that gap is
-    /// closed we instead distinguish the slice from the owned Array via
-    /// a dedicated `Span<felt252>` type id (a separate `TypeKind::Seq`
-    /// entry) — consumers can dispatch on the lang_type without needing
-    /// the field-level discriminator.  The `is_slice` flag stays `false`
-    /// here to avoid implying we have FFI propagation that we don't.
+    /// The Nim writer's `encode_recursive` arm for `ValueRecord::Sequence`
+    /// now threads the `is_slice` discriminator through
+    /// `ct_value_begin_sequence_with_slice`, so slice/view sequences
+    /// (Cairo `Span<T>`) survive the FFI round-trip with `is_slice = true`.
+    /// We retain the dedicated `Span<felt252>` type id alongside the
+    /// flag so consumers can dispatch on either the lang_type or the
+    /// field-level discriminator.
     fn build_span_value(&mut self, se: &SpanEmission) -> ValueRecord {
         let felt_type_id = self.felt_type_id.expect("felt type id registered");
         let elements: Vec<ValueRecord> = se
@@ -924,7 +921,7 @@ impl CairoTracer {
             TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Seq, "Span<felt252>");
         ValueRecord::Sequence {
             elements,
-            is_slice: false,
+            is_slice: true,
             type_id: span_type_id,
         }
     }
