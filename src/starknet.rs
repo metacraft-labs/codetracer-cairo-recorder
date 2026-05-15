@@ -27,12 +27,33 @@ use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
 #[serde(tag = "type")]
 pub enum TraceEntry {
     /// A call from one contract to another (or to itself).
+    ///
+    /// M10 round-4: optional `visibility` / `self_kind` fields encode
+    /// the StarkNet ABI decorator class for the called method:
+    ///
+    /// * `visibility` ∈ {"external", "view", "internal"}.  When
+    ///   present, the function table entry the converter writes is
+    ///   `<visibility>::<callee>::<selector>` so consumers can group
+    ///   functions by visibility class without re-parsing the
+    ///   contract source.  Absent → the legacy `<callee>::<selector>`
+    ///   form is preserved (no behaviour change for existing
+    ///   fixtures).
+    /// * `self_kind` ∈ {"ref", "snapshot"}.  When present, the
+    ///   converter emits a typed `ValueRecord::Reference` arg named
+    ///   `self_kind` whose `mutable` flag is `true` for `"ref"` and
+    ///   `false` for `"snapshot"` — pinning the @-vs-ref split that
+    ///   distinguishes a state-mutating external from a read-only
+    ///   view at the trace level.
     #[serde(rename = "contract_call")]
     ContractCall {
         caller: String,
         callee: String,
         selector: String,
         calldata: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        visibility: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        self_kind: String,
     },
 
     /// A storage read operation.
@@ -169,6 +190,7 @@ pub fn convert_snforge_trace(entries: &[TraceEntry]) -> Vec<TraceEvent> {
                 callee,
                 selector,
                 calldata,
+                ..
             } => {
                 let name = format!("{}::{}", callee, selector);
                 events.push(TraceEvent::Step { line });
@@ -362,9 +384,22 @@ pub fn write_starknet_trace(
                 callee,
                 selector,
                 calldata,
+                visibility,
+                self_kind,
             } => {
                 TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
-                let name = format!("{}::{}", callee, selector);
+                // M10 round-4: when the JSON entry carries a
+                // `visibility` field, prefix the function table name
+                // with the visibility class so consumers can group
+                // external / view / internal methods without
+                // re-parsing the contract source.  Absent → preserve
+                // the legacy `<callee>::<selector>` form so existing
+                // fixtures keep their pinned function-table strings.
+                let name = if visibility.is_empty() {
+                    format!("{}::{}", callee, selector)
+                } else {
+                    format!("{}::{}::{}", visibility, callee, selector)
+                };
                 let fn_id =
                     TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
 
@@ -382,6 +417,24 @@ pub fn write_starknet_trace(
                         &format!("calldata{idx}"),
                         str_value(item, str_type_id),
                     );
+                }
+                // M10 round-4: when the JSON entry carries a
+                // `self_kind`, emit a typed `ValueRecord::Reference`
+                // arg distinguishing `ref self` (mutable=true) from
+                // `@self` (mutable=false).  Absent → no `self_kind`
+                // arg is emitted, preserving the legacy contract for
+                // fixtures that don't care about the @-vs-ref split.
+                if !self_kind.is_empty() {
+                    let mutable = self_kind == "ref";
+                    let ref_type_id =
+                        TraceWriter::ensure_type_id(&mut *writer, TypeKind::Ref, "Self");
+                    let value = ValueRecord::Reference {
+                        dereferenced: Box::new(NONE_VALUE),
+                        address: 0,
+                        mutable,
+                        type_id: ref_type_id,
+                    };
+                    let _ = TraceWriter::arg(&mut *writer, "self_kind", value);
                 }
 
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
@@ -808,6 +861,8 @@ mod tests {
                 callee: "0x2".to_string(),
                 selector: "increase_balance".to_string(),
                 calldata: vec!["42".to_string()],
+                visibility: String::new(),
+                self_kind: String::new(),
             },
             TraceEntry::StorageRead {
                 contract: "0x2".to_string(),
@@ -865,6 +920,8 @@ mod tests {
             callee: "0x2".to_string(),
             selector: "transfer".to_string(),
             calldata: vec!["0x3".to_string(), "100".to_string()],
+            visibility: String::new(),
+            self_kind: String::new(),
         }];
 
         let events = convert_snforge_trace(&entries);
@@ -988,6 +1045,8 @@ mod tests {
             callee: "0x2".to_string(),
             selector: "get_balance".to_string(),
             calldata: vec![],
+            visibility: String::new(),
+            self_kind: String::new(),
         }];
 
         let events = convert_snforge_trace(&entries);

@@ -1,0 +1,32 @@
+{
+  "test_name": "test_visibility_decorators",
+  "contract_address": "0xbabe",
+  "entries": [
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xbabe",
+      "selector": "deposit",
+      "calldata": ["50"],
+      "visibility": "external",
+      "self_kind": "ref"
+    },
+    {
+      "type": "contract_call",
+      "caller": "0xbabe",
+      "callee": "0xbabe",
+      "selector": "validate",
+      "calldata": ["50"],
+      "visibility": "internal"
+    },
+    {
+      "type": "contract_call",
+      "caller": "0x1",
+      "callee": "0xbabe",
+      "selector": "balance_of",
+      "calldata": [],
+      "visibility": "view",
+      "self_kind": "snapshot"
+    }
+  ]
+}
