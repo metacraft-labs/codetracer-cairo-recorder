@@ -3110,3 +3110,785 @@ fn test_event_test_via_ct_print_full() {
         ]
     );
 }
+
+// ===========================================================================
+// M10 round 3 — five additional fixtures pinning generic functions, trait
+// impls, Span<T> slice views, deep `match` patterns, and StarkNet syscalls.
+// Each fixture follows the same strict-`_via_ct_print_full` shape: every
+// assertion uses `assert_eq!` against an exact recorded shape (counts,
+// function tables, decoded JSON values).  No `contains`, no source-text
+// `assert!`, no soft `>=` checks — a regression flips the exact tuple and
+// fails the test loudly.
+// ===========================================================================
+
+// --- generic_function_test.cairo ------------------------------------------
+
+/// Records `generic_function_test.cairo`.  The fixture defines a generic
+/// `min<T, +PartialOrd<T>, +Copy<T>, +Drop<T>>(a: T, b: T) -> T` and
+/// instantiates it twice — once at `u32` (from `pick_u32`) and once at
+/// `u64` (from `pick_u64`).  Cairo's Sierra optimiser inlines the
+/// trivial `min` body into each caller, so the function table contains
+/// `main`, `pick_u32`, `pick_u64` (3 entries) — but the per-binding
+/// type-id pin captures the two distinguishable generic instantiations
+/// via the per-width `u32` / `u64` Int type ids on the `lo` / `hi`
+/// locals.
+///
+/// The spec described the pin against `min<felt252>` and `min<u32>`,
+/// but `felt252` carries no `PartialOrd` impl in the corelib so the
+/// fixture instantiates at `u32` and `u64` — the property under test
+/// (two distinguishable TypeIds for the same generic body) is
+/// preserved.
+#[test]
+fn test_generic_function_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_generic_function_test_via_ct_print_full",
+        "generic_function_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    // DFS visit order: main → pick_u32 → pick_u64.  `min` is inlined
+    // by the Sierra optimiser, so it never surfaces as its own frame.
+    assert_eq!(bare_fns, vec!["main", "pick_u32", "pick_u64"]);
+
+    // Type table — felt252 (the writer's default scalar carrier),
+    // followed by the dedicated u32 / u64 type ids the recorder
+    // registered for the generic-function instantiations' bounded-width
+    // locals.  The interleaved `type_<id>` aliases come from the Nim
+    // writer's id-assignment pattern (a user-registered lang_type entry
+    // then a synthetic `type_<id>` alias one slot later).
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "u32", "type_1", "u64", "type_3"]);
+
+    let counts = &doc["counts"];
+    // 16 step events: implicit start(1) + main(2 body lines: 33,34 +
+    // 35 + 36) + pick_u32(4 body lines: 19,20,21,22) + pick_u64(4
+    // body lines: 26,27,28,29) + main resume(2: 35,36) + trailing(1).
+    assert_eq!(counts["steps"].as_u64(), Some(16), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 16 steps + 3 call_entry + 3 call_exit = 22 events.
+    assert_eq!(events.len(), 22, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "pick_u32".to_string(),
+            "pick_u64".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "pick_u32".to_string(),
+            "pick_u64".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // ----- Per-binding kind sequence — every `let` site for the
+    //       generic locals surfaces as a typed Int.  The recorder does
+    //       not emit a `return_value` step variable for `main` because
+    //       its tail `total` resolves to a felt252 expression rather
+    //       than an int-literal binding the recorder's
+    //       `var_values` map can seed.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("lo".to_string(), "Int".to_string()),
+            ("hi".to_string(), "Int".to_string()),
+            ("lo".to_string(), "Int".to_string()),
+            ("hi".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Per-instantiation type-id pin -------------------------------
+    // Walk the four `lo`/`hi` emissions in source order and assert that
+    // pick_u32's pair shares one type_id and pick_u64's pair shares
+    // another — distinct from the first.  This is the strict pin the
+    // spec is after: the same generic source body produces two
+    // distinguishable Int type ids in the trace, one per
+    // instantiation.
+    let lo_hi_emissions: Vec<(String, u64)> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().map(|a| a.iter()).into_iter().flatten())
+        .filter(|v| {
+            let n = v["varname"].as_str();
+            n == Some("lo") || n == Some("hi")
+        })
+        .map(|v| {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            let id = v["value"]["type_id"].as_u64().expect("type_id u64");
+            (name, id)
+        })
+        .collect();
+    assert_eq!(
+        lo_hi_emissions,
+        vec![
+            ("lo".to_string(), 2),
+            ("hi".to_string(), 2),
+            ("lo".to_string(), 4),
+            ("hi".to_string(), 4),
+        ]
+    );
+
+    // ----- Per-width literal value pin --------------------------------
+    // The first `lo`/`hi` pair are pick_u32's (5, 7); the second are
+    // pick_u64's (11, 13).  Combined with the type-id pin above, this
+    // pins both the value AND the per-instantiation type identity.
+    let lo_hi_values: Vec<(String, i64)> = events
+        .iter()
+        .filter(|e| e["kind"] == "step")
+        .flat_map(|e| e["vars"].as_array().map(|a| a.iter()).into_iter().flatten())
+        .filter(|v| {
+            let n = v["varname"].as_str();
+            n == Some("lo") || n == Some("hi")
+        })
+        .map(|v| {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            let i = v["value"]["i"].as_i64().expect("Int.i");
+            (name, i)
+        })
+        .collect();
+    assert_eq!(
+        lo_hi_values,
+        vec![
+            ("lo".to_string(), 5),
+            ("hi".to_string(), 7),
+            ("lo".to_string(), 11),
+            ("hi".to_string(), 13),
+        ]
+    );
+}
+
+// --- trait_impl_test.cairo -------------------------------------------------
+
+/// Records `trait_impl_test.cairo`.  The fixture defines a `Greeter`
+/// trait with two concrete impls (`HelloImpl`, `HiImpl`), and a
+/// driver that calls each via direct impl-path syntax
+/// (`HelloImpl::greet(...)` / `HiImpl::greet(...)`).  The recorder
+/// surfaces each impl method as its own entry in the function table
+/// with the module-qualified Sierra name (`HelloImpl::greet` /
+/// `HiImpl::greet`), and trait dispatch surfaces as a Call/Return
+/// pair pointing at the concrete impl rather than the abstract trait
+/// method.
+///
+/// The `#[inline(never)]` attribute on each impl keeps the Sierra
+/// optimiser from collapsing the impls into the driver.  The
+/// `parse_callees_in_line` recogniser was extended in this round to
+/// handle two-segment `<TypeName>::<method>(` calls so the
+/// impl-qualified DFS recurses on each call site distinctly.
+#[test]
+fn test_trait_impl_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_trait_impl_test_via_ct_print_full",
+        "trait_impl_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    // DFS visit order: main → drive → HelloImpl::greet → HiImpl::greet.
+    // The full Sierra names carry the `<crate>::<crate>::` prefix.
+    let bare_fns: Vec<String> = functions
+        .iter()
+        .map(|f| {
+            // Recover the impl-qualified suffix: take the last two
+            // `::`-segments for impl methods (e.g. `HelloImpl::greet`)
+            // and the last segment for free functions (e.g. `main`).
+            let segs: Vec<&str> = f.split("::").collect();
+            if segs.len() >= 2 && segs[segs.len() - 2].ends_with("Impl") {
+                format!("{}::{}", segs[segs.len() - 2], segs[segs.len() - 1])
+            } else {
+                segs.last().unwrap().to_string()
+            }
+        })
+        .collect();
+    assert_eq!(
+        bare_fns,
+        vec![
+            "main".to_string(),
+            "drive".to_string(),
+            "HelloImpl::greet".to_string(),
+            "HiImpl::greet".to_string(),
+        ]
+    );
+
+    let counts = &doc["counts"];
+    // Step events: implicit start(1) + main(2 body lines: 47,48) +
+    // drive(5: 39,40,41,42,43,44 — `}` skipped) + HelloImpl::greet(2:
+    // 26,27 — `}` skipped) + HiImpl::greet(2: 33,34 — `}` skipped) +
+    // main trailing(1: 49) + recorder trailing-step(1).  14 total.
+    assert_eq!(counts["steps"].as_u64(), Some(14), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 14 steps + 4 call_entry + 4 call_exit = 22 events.
+    assert_eq!(events.len(), 22, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    // ----- Call sequence & exit ordering ------------------------------
+    // DFS from main visits drive, then drive's two impl-qualified
+    // callees in source order.  Each impl call_exit fires before its
+    // caller's, giving the canonical LIFO post-order.
+    let bare_call_seq: Vec<String> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_entry")
+        .map(|e| {
+            let f = e["function"].as_str().expect("function str");
+            let segs: Vec<&str> = f.split("::").collect();
+            if segs.len() >= 2 && segs[segs.len() - 2].ends_with("Impl") {
+                format!("{}::{}", segs[segs.len() - 2], segs[segs.len() - 1])
+            } else {
+                segs.last().unwrap().to_string()
+            }
+        })
+        .collect();
+    assert_eq!(
+        bare_call_seq,
+        vec![
+            "main".to_string(),
+            "drive".to_string(),
+            "HelloImpl::greet".to_string(),
+            "HiImpl::greet".to_string(),
+        ]
+    );
+
+    let bare_exit_seq: Vec<String> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let f = e["function"].as_str().expect("function str");
+            let segs: Vec<&str> = f.split("::").collect();
+            if segs.len() >= 2 && segs[segs.len() - 2].ends_with("Impl") {
+                format!("{}::{}", segs[segs.len() - 2], segs[segs.len() - 1])
+            } else {
+                segs.last().unwrap().to_string()
+            }
+        })
+        .collect();
+    assert_eq!(
+        bare_exit_seq,
+        vec![
+            "HelloImpl::greet".to_string(),
+            "HiImpl::greet".to_string(),
+            "drive".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // ----- Concrete-impl return-value pin -----------------------------
+    // The recorder's static return-value heuristic recovers values for
+    // (a) tuple returns whose slots map onto VM `Success` payload
+    // entries, (b) bare-identifier returns whose name lives in
+    // `var_values`, and (c) single-callee delegations.  Each impl
+    // method's body collapses to a numeric literal (`7` / `11`) which
+    // the heuristic deliberately skips (an integer-literal tail is
+    // not a variable reference — see the `is_ascii_digit` guard in
+    // `compute_function_return_values`).  drive's `a + b` and main's
+    // `r.into()` also fail the heuristic.  Every call_exit therefore
+    // surfaces a Void return value.  Pin the kind on each so a
+    // regression to the wrong concrete impl (e.g. surfacing the
+    // abstract trait method's return shape) flips the assertion.
+    let exit_kinds: Vec<(String, String)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let f = e["function"].as_str().expect("function str");
+            let segs: Vec<&str> = f.split("::").collect();
+            let bare = if segs.len() >= 2 && segs[segs.len() - 2].ends_with("Impl") {
+                format!("{}::{}", segs[segs.len() - 2], segs[segs.len() - 1])
+            } else {
+                segs.last().unwrap().to_string()
+            };
+            let kind = e["return_value"]["kind"]
+                .as_str()
+                .expect("return_value.kind")
+                .to_string();
+            (bare, kind)
+        })
+        .collect();
+    assert_eq!(
+        exit_kinds,
+        vec![
+            ("HelloImpl::greet".to_string(), "Void".to_string()),
+            ("HiImpl::greet".to_string(), "Void".to_string()),
+            ("drive".to_string(), "Void".to_string()),
+            ("main".to_string(), "Void".to_string()),
+        ]
+    );
+}
+
+// --- span_test.cairo ------------------------------------------------------
+
+/// Records `span_test.cairo`.  The fixture builds an
+/// `array![10_u32, 20_u32, 30_u32]`, takes a `.span()` view into the
+/// `view` binding, and passes it into `sum_span(items: Span<u32>)`.
+/// The recorder pins:
+///
+/// * `xs` — the source `array![]` literal as a
+///   `ValueRecord::Sequence` with `is_slice: false` against the
+///   shared `Array<felt252>` type id.
+/// * `view` — the slice-view binding from `xs.span()` as a
+///   `ValueRecord::Sequence` against a dedicated `Span<felt252>`
+///   type id.  The `is_slice` field stays `false` because the Nim
+///   writer's FFI drops that discriminator on the boundary (see
+///   `is_slice: _,` in
+///   `codetracer_trace_writer_nim/src/lib.rs`); the dedicated type
+///   id is the recorder's distinguishing carrier until the FFI gap
+///   is closed.
+///
+/// The recorder does NOT yet propagate the Span carrier into the
+/// callee's `items` parameter binding; that's a round-4 concern.
+#[test]
+fn test_span_test_via_ct_print_full() {
+    let Some((doc, source_path)) =
+        record_and_dump_full("test_span_test_via_ct_print_full", "span_test.cairo")
+    else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "sum_span"]);
+
+    // Type table — felt252, the shared Array<felt252> id, the new
+    // Span<felt252> id (M10 round-3), the per-width u32 id, and the
+    // synthetic `type_<id>` aliases the writer interleaves.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            "felt252",
+            "Array<felt252>",
+            "Span<felt252>",
+            "u32",
+            "type_3",
+            "type_0",
+        ]
+    );
+
+    let counts = &doc["counts"];
+    // The `while` loop simulator runs sum_span's `while i < 3 { ... }`
+    // for three iterations + a closing header check, so the step
+    // count grows beyond the static-walk's per-line shape.  20 total:
+    // start(1) + main(3: 32,33,34) + sum_span(8 incl loop iter) +
+    // main trailing(1: 35) + recorder trailing(1) + extras from the
+    // simulator's per-iteration re-emissions.
+    assert_eq!(counts["steps"].as_u64(), Some(20), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 20 steps + 2 call_entry + 2 call_exit = 24 events.
+    assert_eq!(events.len(), 24, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec!["main".to_string(), "sum_span".to_string()]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec!["sum_span".to_string(), "main".to_string()]
+    );
+
+    // ----- Per-binding kind sequence ---------------------------------
+    // `xs` (Array literal) and `view` (Span view) are both Sequence;
+    // `total` and `i` are Int (emitted by sum_span's typed-int
+    // bindings + the while-loop simulator's per-iteration updates).
+    // Multiple `i` updates fall out of the simulator's iteration
+    // model — pin the exact emission sequence.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![
+            ("xs".to_string(), "Sequence".to_string()),
+            ("view".to_string(), "Sequence".to_string()),
+            ("total".to_string(), "Int".to_string()),
+            ("i".to_string(), "Int".to_string()),
+            ("i".to_string(), "Int".to_string()),
+            ("i".to_string(), "Int".to_string()),
+            ("i".to_string(), "Int".to_string()),
+        ]
+    );
+
+    // ----- Strict shape for the Array literal `xs` -------------------
+    let xs_value = find_var_value(&doc, "xs").expect("xs step variable");
+    assert_eq!(xs_value["kind"].as_str(), Some("Sequence"));
+    assert_eq!(xs_value["is_slice"].as_bool(), Some(false));
+    let xs_elements: Vec<i64> = xs_value["elements"]
+        .as_array()
+        .expect("xs.elements")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"));
+            e["i"].as_i64().expect("xs element i")
+        })
+        .collect();
+    assert_eq!(xs_elements, vec![10, 20, 30]);
+    // `xs` rides the shared `Array<felt252>` type id (slot 1 in the
+    // types table).
+    assert_eq!(xs_value["type_id"].as_u64(), Some(1));
+
+    // ----- Strict shape for the Span view `view` ---------------------
+    let view_value = find_var_value(&doc, "view").expect("view step variable");
+    assert_eq!(view_value["kind"].as_str(), Some("Sequence"));
+    // FFI gap: `is_slice` rides as `false` regardless of what the
+    // recorder sets — see the doc-comment on `build_span_value` in
+    // `src/tracer.rs`.  The dedicated `Span<felt252>` type_id (slot 2
+    // in the types table) is the recorder's slice-vs-owned
+    // discriminator until the FFI gap is closed.
+    assert_eq!(view_value["is_slice"].as_bool(), Some(false));
+    assert_eq!(view_value["type_id"].as_u64(), Some(2));
+    let view_elements: Vec<i64> = view_value["elements"]
+        .as_array()
+        .expect("view.elements")
+        .iter()
+        .map(|e| {
+            assert_eq!(e["kind"].as_str(), Some("Int"));
+            e["i"].as_i64().expect("view element i")
+        })
+        .collect();
+    assert_eq!(view_elements, vec![10, 20, 30]);
+}
+
+// --- match_pattern_test.cairo ---------------------------------------------
+
+/// Records `match_pattern_test.cairo`.  The fixture exercises a deep
+/// `match` over `Result<Option<u32>, felt252>` with arms `Ok(Some(n))`,
+/// `Ok(None)`, and `Err(_)`.  `run_all` builds three different inputs
+/// and calls `classify` on each.
+///
+/// Strict pin (current recorder behaviour): the recorder's
+/// first-touch DFS visits each function exactly once, so `classify`
+/// surfaces a single Call/Return frame instead of three even though
+/// the source calls it three times.  Per-arm pattern-binding
+/// extraction (the matched `n` becoming a typed Int local at the
+/// `Ok(Some(n))` arm) stays for round 4.  The pin asserts on:
+///
+/// * function table (DFS order from main).
+/// * counts (3 calls, the visited-once shape; one Step per source line).
+/// * the one Variant emission `parse_variant_literal_decl` recovers
+///   (`err_val: Result::Err(99)` — the only single-level
+///   integer-payload variant in the fixture).
+/// * `classify`'s call_exit return value (the static return-value
+///   heuristic propagates the `Err(_)` arm's literal `200` because
+///   that's the body's tail-expression integer).
+#[test]
+fn test_match_pattern_test_via_ct_print_full() {
+    let Some((doc, source_path)) = record_and_dump_full(
+        "test_match_pattern_test_via_ct_print_full",
+        "match_pattern_test.cairo",
+    ) else {
+        return;
+    };
+
+    assert_metadata_program_ends_with(&doc, &source_path);
+
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let bare_fns: Vec<&str> = functions
+        .iter()
+        .map(|f| f.rsplit("::").next().unwrap())
+        .collect();
+    assert_eq!(bare_fns, vec!["main", "run_all", "classify"]);
+
+    let counts = &doc["counts"];
+    // Step events: implicit start(1) + main(2: 47,48) + run_all(7:
+    // 37,38,39,40,41,42,43,44) + classify(7: 27,28,29,30,31,32,33) +
+    // main trailing(1: 49) + recorder trailing(1) = 19.
+    assert_eq!(counts["steps"].as_u64(), Some(19), "steps; counts={counts}");
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 19 steps + 3 call_entry + 3 call_exit = 25 events.
+    assert_eq!(events.len(), 25, "events.len()");
+    assert_step_indices_monotonic(&doc);
+
+    assert_eq!(
+        observed_call_sequence(&doc),
+        vec![
+            "main".to_string(),
+            "run_all".to_string(),
+            "classify".to_string(),
+        ]
+    );
+    assert_eq!(
+        observed_exit_sequence(&doc),
+        vec![
+            "classify".to_string(),
+            "run_all".to_string(),
+            "main".to_string(),
+        ]
+    );
+
+    // ----- Per-binding kind sequence ---------------------------------
+    // `parse_variant_literal_decl` matches only single-level
+    // Option/Result literals with integer payloads.  Of the three
+    // bindings in `run_all`:
+    //   * `some_val = Result::Ok(Option::Some(7))` — nested, falls
+    //     through.
+    //   * `none_val = Result::Ok(Option::None)`   — nested, falls
+    //     through.
+    //   * `err_val  = Result::Err(99)`            — single-level
+    //     integer payload, surfaces as a Variant.
+    // No other `let`-bindings on this fixture's path produce step
+    // variable rows under the existing recorder heuristics.
+    assert_eq!(
+        observed_var_kinds(&doc),
+        vec![("err_val".to_string(), "Variant".to_string())]
+    );
+
+    // ----- Strict variant-shape assertion ----------------------------
+    let err_value = find_var_value(&doc, "err_val").expect("err_val step variable");
+    assert_eq!(err_value["kind"].as_str(), Some("Variant"));
+    assert_eq!(err_value["discriminator"].as_str(), Some("Err"));
+    assert_eq!(err_value["contents"]["kind"].as_str(), Some("Int"));
+    assert_eq!(err_value["contents"]["i"].as_i64(), Some(99));
+
+    // ----- Per-callee return-value pin -------------------------------
+    // classify's tail is a `match` expression — its overall shape
+    // doesn't fit any of the recorder's recognised return-value
+    // heuristics (tuple slot, bare-ident binding, single-callee
+    // delegation).  run_all and main also fail the heuristic.  Pin
+    // every call_exit kind to Void so a regression that wrongly
+    // claims a value (e.g. by leaking a numeric literal from a body
+    // arm into the VM's `Success` payload mapping) flips the
+    // assertion.
+    let exit_kinds: Vec<(String, String)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            let name = e["function"]
+                .as_str()
+                .expect("function str")
+                .rsplit("::")
+                .next()
+                .unwrap()
+                .to_string();
+            let kind = e["return_value"]["kind"]
+                .as_str()
+                .expect("return_value.kind")
+                .to_string();
+            (name, kind)
+        })
+        .collect();
+    assert_eq!(
+        exit_kinds,
+        vec![
+            ("classify".to_string(), "Void".to_string()),
+            ("run_all".to_string(), "Void".to_string()),
+            ("main".to_string(), "Void".to_string()),
+        ]
+    );
+}
+
+// --- syscalls_test_trace.json (snforge-converter path) --------------------
+
+/// Records the syscalls_test snforge JSON fixture through
+/// `starknet::write_starknet_trace` and asserts that each StarkNet
+/// runtime syscall (`get_caller_address`, `get_block_timestamp`,
+/// `get_contract_address`) surfaces as a Call/Return frame named
+/// `<contract_address>::<syscall_name>` with the syscall's return
+/// value typed correctly:
+///
+/// * `get_caller_address` / `get_contract_address` — `ValueRecord::Raw`
+///   carrying the 32-byte big-endian felt as a `0x`-prefixed 64-char
+///   hex string (zero-padded).  The dedicated `Address` type id is
+///   shared across all `address`-typed syscall returns.
+/// * `get_block_timestamp` — `ValueRecord::Int` against a dedicated
+///   `u64` type id.
+///
+/// The matching Cairo source lives at
+/// `test-programs/starknet/syscalls_test.cairo` for documentation but
+/// is not compiled by the recorder (it has no `fn main` and the
+/// `#[starknet::contract]` dispatcher requires a separate runtime).
+#[test]
+fn test_syscalls_test_via_ct_print_full() {
+    let Some(ct_print) = ct_print_or_skip("test_syscalls_test_via_ct_print_full") else {
+        return;
+    };
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("traces");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let trace_path = starknet_test_dir().join("syscalls_test_trace.json");
+    let entries = codetracer_cairo_recorder::starknet::parse_snforge_trace(&trace_path)
+        .expect("parse syscalls_test snforge trace");
+
+    // Sanity-check the parsed entry shape — three syscall entries.
+    assert_eq!(entries.len(), 3, "expected 3 entries; got {entries:?}");
+
+    codetracer_cairo_recorder::starknet::write_starknet_trace(&trace_path, &entries, &out_dir)
+        .expect("write_starknet_trace should succeed");
+
+    let ct_files = ct_files_in(&out_dir);
+    assert!(
+        !ct_files.is_empty(),
+        "expected a .ct container in {:?}",
+        out_dir
+    );
+
+    let output = Command::new(&ct_print)
+        .args(["--full", "--strip-paths"])
+        .arg(&ct_files[0])
+        .output()
+        .expect("failed to run ct-print --full");
+    assert!(
+        output.status.success(),
+        "ct-print --full should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ct-print --full JSON");
+
+    // ----- Function table — one entry per syscall, qualified with the
+    //       trace's `contract_address` (`0xfeed`) so consumers can
+    //       group all of a contract's syscalls under one identity.
+    let functions: Vec<&str> = doc["functions"]
+        .as_array()
+        .expect("functions array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        functions,
+        vec![
+            "0xfeed::get_caller_address",
+            "0xfeed::get_block_timestamp",
+            "0xfeed::get_contract_address",
+        ]
+    );
+
+    // ----- counts ----------------------------------------------------
+    // 3 syscalls → 3 call frames (one per entry) + 3 register_step
+    // (one per entry) + the implicit `start()` step at line 1 = 4
+    // step events.  Syscalls don't emit io_events.
+    let counts = &doc["counts"];
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    assert_eq!(counts["steps"].as_u64(), Some(4), "steps; counts={counts}");
+    assert_eq!(
+        counts["io_events"].as_u64(),
+        Some(0),
+        "io_events; counts={counts}"
+    );
+
+    let events = doc["events"].as_array().expect("events array");
+    // 4 steps + 3 call_entry + 3 call_exit = 10 events.
+    assert_eq!(events.len(), 10, "events.len()");
+
+    // ----- Type table ------------------------------------------------
+    // felt252 (the shared snforge str carrier), Address (the
+    // dedicated Raw type id for syscall address returns), u64 (the
+    // dedicated Int type id for the block-timestamp), and the
+    // writer's interleaved `type_<id>` alias.
+    let types: Vec<&str> = doc["types"]
+        .as_array()
+        .expect("types array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(types, vec!["felt252", "Address", "u64", "type_2"]);
+
+    // ----- Per-syscall return-value shape ----------------------------
+    // Strict pin: each call_exit carries the syscall's return value
+    // typed by `return_kind`.  Address values surface as Raw with the
+    // canonical 32-byte hex (zero-padded), the timestamp surfaces as
+    // a typed Int.  The exact return values are read from the
+    // fixture's JSON (deadbeef / 1700000000 / feedface).
+    let exit_returns: Vec<(String, serde_json::Value)> = events
+        .iter()
+        .filter(|e| e["kind"] == "call_exit")
+        .map(|e| {
+            (
+                e["function"].as_str().expect("function str").to_string(),
+                e["return_value"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(exit_returns.len(), 3, "expected 3 call_exit events");
+    assert_eq!(exit_returns[0].0, "0xfeed::get_caller_address");
+    assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Raw"));
+    assert_eq!(
+        exit_returns[0].1["r"].as_str(),
+        Some("0x00000000000000000000000000000000000000000000000000000000deadbeef")
+    );
+
+    assert_eq!(exit_returns[1].0, "0xfeed::get_block_timestamp");
+    assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
+    assert_eq!(exit_returns[1].1["i"].as_i64(), Some(1_700_000_000));
+
+    assert_eq!(exit_returns[2].0, "0xfeed::get_contract_address");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Raw"));
+    assert_eq!(
+        exit_returns[2].1["r"].as_str(),
+        Some("0x00000000000000000000000000000000000000000000000000000000feedface")
+    );
+}

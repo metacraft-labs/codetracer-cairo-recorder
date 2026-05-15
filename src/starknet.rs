@@ -59,6 +59,29 @@ pub enum TraceEntry {
         keys: Vec<String>,
         data: Vec<String>,
     },
+
+    /// A StarkNet runtime syscall (e.g. `get_caller_address`,
+    /// `get_block_timestamp`, `get_contract_address`).  M10 round-3:
+    /// each surfaces as a Call/Return frame named after the syscall,
+    /// with the return value typed by `return_kind`:
+    ///
+    /// * `"address"` — `ValueRecord::Raw` carrying the 32-byte
+    ///   big-endian felt of a contract / wallet address.  Encoded as a
+    ///   `0x`-prefixed hex string of up to 32 bytes (64 hex chars) in
+    ///   the JSON; the recorder pads to 32 bytes.
+    /// * `"u64"` — `ValueRecord::Int` decoded from the decimal /
+    ///   `0x`-prefixed string.  Used for the block-timestamp /
+    ///   block-number / nonce-style syscalls.
+    ///
+    /// Unrecognised `return_kind` values fall back to a string-typed
+    /// `ValueRecord::String` so the trace stays self-describing without
+    /// pretending to know the value's shape.
+    #[serde(rename = "syscall")]
+    Syscall {
+        name: String,
+        return_kind: String,
+        return_value: String,
+    },
 }
 
 /// Top-level structure of an snforge trace file produced by
@@ -236,6 +259,29 @@ pub fn convert_snforge_trace(entries: &[TraceEntry]) -> Vec<TraceEvent> {
                 }
                 events.push(TraceEvent::Return);
             }
+            TraceEntry::Syscall {
+                name,
+                return_kind,
+                return_value,
+            } => {
+                // Mirror the contract_call / storage_* shape: emit a
+                // Step + Call + Variable(return) + Return triple.  The
+                // syscall name is unprefixed because syscalls are global
+                // to the StarkNet runtime — the dedicated Cairo
+                // converter writer arm pairs each syscall with the
+                // contract address it was invoked from.
+                events.push(TraceEvent::Step { line });
+                events.push(TraceEvent::Call { name: name.clone() });
+                events.push(TraceEvent::Variable {
+                    name: "return_kind".to_string(),
+                    value: return_kind.clone(),
+                });
+                events.push(TraceEvent::Variable {
+                    name: "return_value".to_string(),
+                    value: return_value.clone(),
+                });
+                events.push(TraceEvent::Return);
+            }
         }
         line += 1;
     }
@@ -286,6 +332,18 @@ pub fn write_starknet_trace(
     TraceWriter::start(&mut *writer, trace_path, Line(1));
 
     let str_type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::String, "felt252");
+
+    // Recover the trace's `contract_address` field — used as the
+    // qualifying prefix for syscall function names so consumers can
+    // group all of a contract's syscalls under one identity.  Failure
+    // to re-parse falls back to an empty prefix (the syscall function
+    // name then surfaces unprefixed) — the test pin still holds, just
+    // without the contract-address grouping.
+    let entry_contract: String = std::fs::read_to_string(trace_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<SnforgeTrace>(&s).ok())
+        .map(|t| t.contract_address)
+        .unwrap_or_default();
 
     // Walk entries directly so we can:
     //   - stage call args via TraceWriter::arg(name, value) before
@@ -389,6 +447,71 @@ pub fn write_starknet_trace(
                     metadata,
                     &content,
                 );
+            }
+            TraceEntry::Syscall {
+                name,
+                return_kind,
+                return_value,
+            } => {
+                // M10 round-3: each syscall surfaces as a Call/Return
+                // pair named `<contract>::<syscall_name>` (the
+                // contract-address prefix matches the storage_read /
+                // storage_write naming so consumers can group all of
+                // a call's effects under one contract id).  The
+                // syscall return value rides on the call_exit event
+                // as a typed `ValueRecord` whose shape depends on
+                // `return_kind`:
+                //
+                //   * `"address"` — `ValueRecord::Raw` carrying the
+                //     `0x`-prefixed hex string (zero-padded to 64
+                //     chars / 32 bytes) so consumers can recover the
+                //     raw 256-bit address without parsing.
+                //   * `"u64"`     — `ValueRecord::Int` against a
+                //     dedicated `u64` type id; the value is parsed
+                //     from the JSON's decimal / `0x`-prefixed string.
+                //
+                // Anything else falls back to a `ValueRecord::String`
+                // so the trace stays self-describing.
+                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                let qualified = if entry_contract.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{entry_contract}::{name}")
+                };
+                let fn_id =
+                    TraceWriter::ensure_function_id(&mut *writer, &qualified, trace_path, Line(1));
+                TraceWriter::register_call(&mut *writer, fn_id, vec![]);
+                let return_record = match return_kind.as_str() {
+                    "address" => {
+                        // Pad the hex string to 64 chars (32 bytes) so
+                        // consumers always see the canonical
+                        // 256-bit-wide raw form regardless of leading
+                        // zeros in the input JSON.
+                        let bare = return_value.strip_prefix("0x").unwrap_or(return_value);
+                        let padded = format!("0x{:0>64}", bare);
+                        let raw_id =
+                            TraceWriter::ensure_type_id(&mut *writer, TypeKind::Raw, "Address");
+                        ValueRecord::Raw {
+                            r: padded,
+                            type_id: raw_id,
+                        }
+                    }
+                    "u64" => {
+                        let int_id =
+                            TraceWriter::ensure_type_id(&mut *writer, TypeKind::Int, "u64");
+                        let parsed = if let Some(hex) = return_value.strip_prefix("0x") {
+                            i64::from_str_radix(hex, 16).unwrap_or(0)
+                        } else {
+                            return_value.parse::<i64>().unwrap_or(0)
+                        };
+                        ValueRecord::Int {
+                            i: parsed,
+                            type_id: int_id,
+                        }
+                    }
+                    _ => str_value(return_value, str_type_id),
+                };
+                TraceWriter::register_return(&mut *writer, return_record);
             }
             TraceEntry::Event {
                 contract,

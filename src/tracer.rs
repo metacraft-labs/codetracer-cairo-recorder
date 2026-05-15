@@ -364,6 +364,14 @@ impl CairoTracer {
         // post-mutation contents (M10 round-2 array_operations pin).
         let array_mutations = parse_array_mutations(source_code, &compound_bindings);
 
+        // Parse `let <view> = <array>.span();` slice-view bindings so
+        // each surfaces as a `ValueRecord::Sequence { is_slice: true,
+        // ... }` carrying the source array's elements (M10 round-3
+        // span pin).  The recorder doesn't yet propagate the Span
+        // carrier into a callee parameter binding — the slice marker
+        // lives on the source-side `view` binding only.
+        let span_emissions = parse_span_emissions(source_code, &compound_bindings);
+
         // Parse the return expression of the **outermost** tuple-returning
         // function (typically `compute`) to map success-return-value slots
         // back to variable names.  Used both to populate scalar
@@ -444,6 +452,7 @@ impl CairoTracer {
                 &reference_emissions,
                 &typed_int_bindings,
                 &array_mutations,
+                &span_emissions,
                 &var_values,
                 &mut visited,
             );
@@ -471,6 +480,7 @@ impl CairoTracer {
         reference_emissions: &[ReferenceEmission],
         typed_int_bindings: &[TypedIntBinding],
         array_mutations: &[ArrayMutation],
+        span_emissions: &[SpanEmission],
         var_values: &std::collections::HashMap<String, i64>,
         visited: &mut std::collections::HashSet<String>,
     ) {
@@ -657,6 +667,21 @@ impl CairoTracer {
                 }
             }
 
+            // Emit Span<T> view bindings (`let view = <arr>.span();`)
+            // as `ValueRecord::Sequence { is_slice: true, ... }` so
+            // consumers can distinguish a borrowed slice view from an
+            // owned Array (M10 round-3 span pin).
+            for se in span_emissions {
+                if se.line == abs_line {
+                    let value = self.build_span_value(se);
+                    TraceWriter::register_variable_with_full_value(
+                        &mut *self.writer,
+                        &se.name,
+                        value,
+                    );
+                }
+            }
+
             // Emit bounded-width integer let-bindings declared on
             // this line (M10 round-2 numeric-width pin).  Each
             // surfaces as `ValueRecord::Int { type_id }` against the
@@ -691,6 +716,7 @@ impl CairoTracer {
                     reference_emissions,
                     typed_int_bindings,
                     array_mutations,
+                    span_emissions,
                     var_values,
                     visited,
                 );
@@ -868,6 +894,39 @@ impl CairoTracer {
         let id = TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Struct, &lang_type);
         self.struct_type_ids.insert(lang_type, id);
         id
+    }
+
+    /// Build a `ValueRecord::Sequence` for a `let <name> = <arr>.span();`
+    /// slice-view binding.  Elements come from the source Array
+    /// CompoundBinding.
+    ///
+    /// FFI-gap pin: the Nim writer's `encode_recursive` arm for
+    /// `ValueRecord::Sequence` currently drops the `is_slice` discriminator
+    /// on the FFI boundary (see `is_slice: _,` in
+    /// `codetracer_trace_writer_nim/src/lib.rs`), so a slice tag set to
+    /// `true` here would not survive the round-trip.  Until that gap is
+    /// closed we instead distinguish the slice from the owned Array via
+    /// a dedicated `Span<felt252>` type id (a separate `TypeKind::Seq`
+    /// entry) — consumers can dispatch on the lang_type without needing
+    /// the field-level discriminator.  The `is_slice` flag stays `false`
+    /// here to avoid implying we have FFI propagation that we don't.
+    fn build_span_value(&mut self, se: &SpanEmission) -> ValueRecord {
+        let felt_type_id = self.felt_type_id.expect("felt type id registered");
+        let elements: Vec<ValueRecord> = se
+            .elements
+            .iter()
+            .map(|i| ValueRecord::Int {
+                i: *i,
+                type_id: felt_type_id,
+            })
+            .collect();
+        let span_type_id =
+            TraceWriter::ensure_type_id(&mut *self.writer, TypeKind::Seq, "Span<felt252>");
+        ValueRecord::Sequence {
+            elements,
+            is_slice: false,
+            type_id: span_type_id,
+        }
     }
 
     /// Build a `ValueRecord::Sequence` carrying the post-mutation
@@ -1256,6 +1315,21 @@ struct ArrayMutation {
     elements: Vec<i64>,
 }
 
+/// Slice-view binding recovered from `let <name> = <arr>.span();`.
+/// Carries the source Array's contents so the emitted
+/// `ValueRecord::Sequence` shares the underlying element list, and
+/// flips the `is_slice` discriminator on so consumers can distinguish
+/// a borrowed Span<T> from an owned Array<T> binding.
+#[derive(Debug, Clone)]
+struct SpanEmission {
+    /// Bound view name (the LHS of the let).
+    name: String,
+    /// 1-based source line of the let — also the emit line.
+    line: u32,
+    /// Element values copied from the source Array binding.
+    elements: Vec<i64>,
+}
+
 /// Bounded-width integer let-binding (`let <name>: u8 = <lit>;` etc.).
 ///
 /// Recovered statically from a `let <name>: <T> = <int_lit>;` line where
@@ -1600,12 +1674,27 @@ fn parse_variant_literal_decl(line: &str) -> Option<(String, String, Vec<i64>)> 
 /// top-level `fn ...` body in the source.  Brace-depth tracker is the
 /// same one used by `parse_return_expression` — kept here as a private
 /// helper to avoid coupling the two.
+///
+/// Trait method signatures (`fn greet(self: T) -> u32;` ending in `;`
+/// rather than `{`) are skipped — they're forward declarations with no
+/// body, so emitting a function entry for them would synthesise a
+/// phantom DFS node whose body actually belongs to the surrounding
+/// trait/impl block.  See `impl_block_ranges` for the impl-method
+/// disambiguation that pairs each impl `greet` with its
+/// `<ImplName>::greet` bare name.
 fn function_line_ranges(lines: &[&str]) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
         if !trimmed.starts_with("fn ") {
+            i += 1;
+            continue;
+        }
+        // Trait method signatures (`fn greet(self: T) -> u32;`) carry no
+        // body — skip them so the function table doesn't synthesise a
+        // phantom range that swallows the surrounding trait/impl block.
+        if trimmed.ends_with(';') && !trimmed.contains('{') {
             i += 1;
             continue;
         }
@@ -1919,6 +2008,75 @@ fn parse_array_mutations(
     out
 }
 
+/// Recover `let <view> = <arr>.span();` slice-view bindings from a
+/// Cairo source.  Each emission carries the source Array's recovered
+/// elements so the recorder can emit a `ValueRecord::Sequence` with
+/// `is_slice: true` flipped on at the let line.
+///
+/// Recognised shape (deliberately conservative):
+///
+/// * `let [mut] <name>[: <T>] = <bare_array>.span();` where
+///   `<bare_array>` is a previously-recognised
+///   `CompoundKind::Array` binding.  Anything more elaborate
+///   (computed RHS, `array![...].span()` inline, multi-method
+///   chain) falls through.
+fn parse_span_emissions(source: &str, compound_bindings: &[CompoundBinding]) -> Vec<SpanEmission> {
+    let mut out = Vec::new();
+    for (line_idx, raw) in source.lines().enumerate() {
+        let trimmed = raw.trim();
+        let rest = match trimmed.strip_prefix("let ") {
+            Some(s) => s,
+            None => continue,
+        };
+        if rest.starts_with('(') {
+            continue;
+        }
+        let eq = match rest.find('=') {
+            Some(p) => p,
+            None => continue,
+        };
+        let lhs = rest[..eq].trim();
+        let rhs = rest[eq + 1..].trim().trim_end_matches(';').trim();
+        let name = if let Some(colon) = lhs.find(':') {
+            lhs[..colon].trim_start_matches("mut ").trim()
+        } else {
+            lhs.trim_start_matches("mut ").trim()
+        };
+        if name.is_empty() {
+            continue;
+        }
+        // RHS must be exactly `<bare_array>.span()`.
+        let dot = match rhs.find('.') {
+            Some(p) => p,
+            None => continue,
+        };
+        let src_name = rhs[..dot].trim();
+        let after_dot = rhs[dot + 1..].trim();
+        if after_dot != "span()" {
+            continue;
+        }
+        if !src_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let binding = match compound_bindings
+            .iter()
+            .find(|b| b.name == src_name && matches!(b.kind, CompoundKind::Array))
+        {
+            Some(b) => b,
+            None => continue,
+        };
+        out.push(SpanEmission {
+            name: name.to_string(),
+            line: (line_idx + 1) as u32,
+            elements: binding.elements.clone(),
+        });
+    }
+    out
+}
+
 /// Recover bounded-width integer let-bindings from a Cairo source.
 /// Each binding becomes a per-line emission of `ValueRecord::Int`
 /// against a width-bearing type id (`u8`, `i64`, etc.) — `u256` is
@@ -2157,22 +2315,61 @@ fn parse_reference_emissions(
 fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEntry> {
     let lines: Vec<&str> = source.lines().collect();
     let ranges = function_line_ranges(&lines);
-    let mut entries = Vec::new();
-    for (start, end) in ranges {
-        let header = lines[start].trim();
-        let bare_name = match extract_fn_name(header) {
+    let impl_ranges = impl_block_ranges(&lines);
+    // First pass: derive the (bare_name, full_name) for every fn so the
+    // callee resolver below can prefer impl-qualified names like
+    // `HelloImpl::greet` over the shared bare `greet`.
+    let mut prelim: Vec<(usize, usize, String, String)> = Vec::new();
+    for (start, end) in &ranges {
+        let header = lines[*start].trim();
+        let raw_name = match extract_fn_name(header) {
             Some(n) => n,
             None => continue,
         };
+        // Find the surrounding `impl <ImplName> of <Trait>` block (if any)
+        // so impl methods get a `<ImplName>::<fn>` bare_name distinct from
+        // the trait-method shared name.  This is what lets two impls of
+        // the same trait surface as independent DFS frames.
+        let impl_name = impl_ranges
+            .iter()
+            .find(|(s, e, _)| *start > *s && *start < *e)
+            .map(|(_, _, name)| name.clone());
+        let bare_name = match &impl_name {
+            Some(impl_n) => format!("{impl_n}::{raw_name}"),
+            None => raw_name.clone(),
+        };
+        // Sierra emits impl methods as `<crate>::<crate>::<ImplName>::<fn>`;
+        // bare functions as `<crate>::<crate>::<fn>`.  Match the longest
+        // recognised suffix so we still pick up impl-qualified names.
+        let suffix = format!("::{}", bare_name);
         let full_name = user_functions
             .iter()
-            .find(|f| f.contains(&format!("::{}", bare_name)))
+            .find(|f| f.ends_with(&suffix) || **f == bare_name)
+            .or_else(|| {
+                user_functions
+                    .iter()
+                    .find(|f| f.contains(&format!("::{}", raw_name)))
+            })
             .map(|s| s.to_string())
             .unwrap_or_else(|| bare_name.clone());
+        prelim.push((*start, *end, bare_name, full_name));
+    }
 
+    // The callee-recognition table is the union of the Sierra user_functions
+    // (so existing fixtures keep matching against e.g. `compute`) plus the
+    // impl-qualified bare names recovered above (so `HelloImpl::greet`
+    // becomes a recognised callee on lines like
+    // `let a = HelloImpl::greet(h);`).
+    let mut bare_callee_names: Vec<String> = prelim.iter().map(|(_, _, b, _)| b.clone()).collect();
+    let user_function_strings: Vec<String> = user_functions.iter().map(|s| s.to_string()).collect();
+    bare_callee_names.extend(user_function_strings.iter().cloned());
+    let bare_callee_refs: Vec<&str> = bare_callee_names.iter().map(|s| s.as_str()).collect();
+
+    let mut entries = Vec::new();
+    for (start, end, bare_name, full_name) in prelim {
         let mut callees_per_line: Vec<Vec<String>> = Vec::with_capacity(end - start + 1);
         for k in start..=end {
-            callees_per_line.push(parse_callees_in_line(lines[k], user_functions));
+            callees_per_line.push(parse_callees_in_line(lines[k], &bare_callee_refs));
         }
 
         let while_loops = parse_while_loops(&lines, start, end);
@@ -2188,6 +2385,66 @@ fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEn
         });
     }
     entries
+}
+
+/// Return inclusive (start, end, ImplName) 0-based line index ranges for
+/// every top-level `impl <Name> of <Trait>` block in the source.  Used by
+/// `build_function_table` to give impl methods a `<ImplName>::<fn>` bare
+/// name distinct from the shared trait-method name (e.g. `greet`),
+/// without which two impls of the same trait would collapse to a single
+/// DFS frame.
+fn impl_block_ranges(lines: &[&str]) -> Vec<(usize, usize, String)> {
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        // Recognise `impl <Name> of <Trait>` (with optional generic
+        // params).  `impl <Name>: ...` (impl-of-impl shorthand) and
+        // `impl<...>` declarations are not exercised by the fixtures
+        // and fall through.
+        let after_impl = match trimmed.strip_prefix("impl ") {
+            Some(s) => s,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        // Pull the impl name — everything up to the first whitespace /
+        // generic / `of` keyword.
+        let stop = after_impl
+            .find(|c: char| c == ' ' || c == '<' || c == ':')
+            .unwrap_or(after_impl.len());
+        let impl_name = after_impl[..stop].trim().to_string();
+        // Must contain ` of ` to be a trait impl (not a free impl block).
+        if !trimmed.contains(" of ") {
+            i += 1;
+            continue;
+        }
+        if impl_name.is_empty() {
+            i += 1;
+            continue;
+        }
+        // Find the matching closing brace.
+        let impl_start = i;
+        let mut brace_depth = 0i32;
+        let mut impl_end = i;
+        for (j, line) in lines.iter().enumerate().skip(impl_start) {
+            for ch in line.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                } else if ch == '}' {
+                    brace_depth -= 1;
+                }
+            }
+            if brace_depth == 0 && j > impl_start {
+                impl_end = j;
+                break;
+            }
+        }
+        ranges.push((impl_start, impl_end, impl_name));
+        i = impl_end + 1;
+    }
+    ranges
 }
 
 /// Walk the function body's lines and recognise top-level `while` loops
@@ -2593,14 +2850,46 @@ fn parse_callees_in_line(line: &str, user_functions: &[&str]) -> Vec<String> {
             // `new` would otherwise look like a call).
             let preceded_by_path = start >= 2 && &trimmed[start - 2..start] == "::";
             // Must be followed by `(` to count as a call.
-            if !preceded_by_path
-                && i < bytes.len()
-                && bytes[i] == b'('
-                && user_functions
+            if i < bytes.len() && bytes[i] == b'(' {
+                if preceded_by_path {
+                    // Try the two-segment `<TypeName>::<method>(` form so
+                    // impl-qualified calls (e.g. `HelloImpl::greet(h)`)
+                    // surface as the joined `<TypeName>::<method>` callee
+                    // — matching the impl-aware bare names produced by
+                    // `build_function_table` for trait impl methods.
+                    // Walk back to find the prior identifier.
+                    let mut p = start - 2;
+                    while p > 0
+                        && (trimmed.as_bytes()[p - 1].is_ascii_alphanumeric()
+                            || trimmed.as_bytes()[p - 1] == b'_')
+                    {
+                        p -= 1;
+                    }
+                    let prefix = &trimmed[p..start - 2];
+                    if !prefix.is_empty()
+                        && prefix
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        let joined = format!("{prefix}::{ident}");
+                        // Don't double-prefix if `prefix` itself was
+                        // preceded by another `::` (Cairo path like
+                        // `core::array::ArrayTrait::new`).
+                        let prefix_preceded_by_path = p >= 2 && &trimmed[p - 2..p] == "::";
+                        if !prefix_preceded_by_path
+                            && user_functions.iter().any(|f| {
+                                f == &joined.as_str() || f.ends_with(&format!("::{}", joined))
+                            })
+                        {
+                            out.push(joined);
+                        }
+                    }
+                } else if user_functions
                     .iter()
                     .any(|f| f == &ident || f.ends_with(&format!("::{}", ident)))
-            {
-                out.push(ident.to_string());
+                {
+                    out.push(ident.to_string());
+                }
             }
         } else {
             i += 1;
@@ -2709,8 +2998,17 @@ fn compute_function_return_values(
                 }
             }
 
-            // Bare-identifier return: that's the value.
-            if tail.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            // Bare-identifier return: that's the value.  Skip
+            // integer-literal tails (`7`, `11`, …) — they're not
+            // variable references and a heuristic that treated them as
+            // such would surface the VM's success-return felt as the
+            // claimed return value of any function whose body collapses
+            // to an integer literal (cross-talk between unrelated
+            // functions).
+            if !tail.is_empty()
+                && tail.chars().all(|c| c.is_alphanumeric() || c == '_')
+                && !tail.chars().all(|c| c.is_ascii_digit())
+            {
                 if let Some(&v) = var_values.get(tail) {
                     out.insert(entry.bare_name.clone(), Some(v));
                     continue;
@@ -2916,9 +3214,17 @@ fn parse_return_expression(source: &str) -> Vec<String> {
                     break;
                 }
 
-                // Single variable return (not a function call).
+                // Single variable return (not a function call).  Skip
+                // integer-literal tails (`7`, `11`) — they would
+                // otherwise pollute `var_values` with numeric-string
+                // keys aliased to the VM's success-return felt and
+                // leak that value into unrelated functions whose body
+                // collapses to a literal of the same numeric form.
                 let expr = line.trim_end_matches(';').trim();
-                if expr.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if !expr.is_empty()
+                    && expr.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && !expr.chars().all(|c| c.is_ascii_digit())
+                {
                     let vars = vec![expr.to_string()];
                     if vars.len() > best.len() {
                         best = vars;
