@@ -54,6 +54,51 @@ fn test_record_nonexistent_file() {
     );
 }
 
+/// M5: the `replay` subcommand, given a saved
+/// `starknet_traceTransaction` JSON fixture via `--trace-file`,
+/// produces a CTFS bundle in `--out-dir` without needing a live RPC
+/// node.  This pins the offline-replay end-to-end CLI contract.
+#[test]
+fn test_replay_with_trace_file_writes_ct_bundle() {
+    let bin = env!("CARGO_BIN_EXE_codetracer-cairo-recorder");
+
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp_dir.path().join("replay-traces");
+
+    let trace_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test-programs/starknet/mock_tx_trace.json");
+
+    let output = Command::new(bin)
+        .args([
+            "replay",
+            "--tx-hash",
+            "0xdeadbeef",
+            "--rpc-url",
+            "http://unused.example.com",
+            "--trace-file",
+            trace_file.to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run replay");
+
+    assert!(
+        output.status.success(),
+        "replay should succeed with --trace-file fixture; stderr=\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Pin the .ct bundle existence: exactly one .ct file in out_dir.
+    let ct_files: Vec<_> = std::fs::read_dir(&out_dir)
+        .expect("read out_dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "ct"))
+        .collect();
+    assert_eq!(ct_files.len(), 1);
+}
+
 #[test]
 fn test_record_invalid_file() {
     // Create a temp file with non-Cairo data.
