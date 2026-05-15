@@ -694,22 +694,118 @@ impl StarknetRpcClient {
 
     /// Fetch a transaction trace from the StarkNet node.
     ///
-    /// Calls `starknet_traceTransaction` via JSON-RPC.
+    /// Calls `starknet_traceTransaction` via JSON-RPC over HTTP using
+    /// [`ureq`] (blocking, no async runtime).  The response is parsed
+    /// into a [`TransactionTrace`] via [`TransactionTrace::from_json`]
+    /// so the live and offline (`--trace-file`) paths share the same
+    /// JSON schema contract.
     ///
-    /// **Note**: This currently returns an error because it requires a live
-    /// RPC connection. In tests, use [`TransactionTrace::from_json`] with
-    /// mock data instead.
+    /// `tx_hash` is forwarded as the single positional parameter of the
+    /// JSON-RPC `params` array — matching the
+    /// [StarkNet JSON-RPC trace API](https://github.com/starkware-libs/starknet-specs).
     pub fn trace_transaction(&self, tx_hash: &str) -> Result<TransactionTrace> {
-        // Placeholder: actual HTTP/JSON-RPC call would go here.
-        // We cannot make real network calls in the test/CI environment,
-        // so this is left as infrastructure scaffolding.
-        Err(eyre!(
-            "live RPC calls not yet implemented (would call {} for tx {})",
-            self.rpc_url,
-            tx_hash
-        ))
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "starknet_traceTransaction",
+            "params": [tx_hash],
+        });
+
+        let response = ureq::post(&self.rpc_url)
+            .set("Content-Type", "application/json")
+            .send_json(&request_body)
+            .map_err(|e| {
+                eyre!(
+                    "starknet_traceTransaction request to {} failed: {e}",
+                    self.rpc_url
+                )
+            })?;
+
+        let body = response
+            .into_string()
+            .with_context(|| format!("failed to read RPC response body from {}", self.rpc_url))?;
+
+        // Surface JSON-RPC errors directly so callers see the upstream
+        // node's error code / message rather than a generic parse
+        // failure.
+        if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(err) = envelope.get("error") {
+                return Err(eyre!(
+                    "starknet_traceTransaction returned JSON-RPC error: {err}"
+                ));
+            }
+        }
+
+        TransactionTrace::from_json(&body)
+    }
+
+    /// Fetch the [`ContractClass`] currently deployed at `contract_address`
+    /// at the given `block_id` (e.g. `"latest"`, `"pending"`, or a
+    /// `{ "block_number": N }` / `{ "block_hash": "0x..." }` JSON
+    /// object) via `starknet_getClassAt`.
+    ///
+    /// Only Cairo 1+ Sierra classes are supported — the JSON-RPC
+    /// response for a Cairo 0 deprecated class lacks the
+    /// `sierra_program` field and will fail to deserialise into
+    /// [`SierraContractClass`].  This matches the recorder's stance
+    /// that the local re-execution path runs against Sierra (the only
+    /// dialect [`SierraCasmRunner`] handles).
+    pub fn get_class_at(
+        &self,
+        block_id: &serde_json::Value,
+        contract_address: &str,
+    ) -> Result<SierraContractClass> {
+        let request_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "starknet_getClassAt",
+            "params": [block_id, contract_address],
+        });
+
+        let response = ureq::post(&self.rpc_url)
+            .set("Content-Type", "application/json")
+            .send_json(&request_body)
+            .map_err(|e| {
+                eyre!(
+                    "starknet_getClassAt request to {} failed: {e}",
+                    self.rpc_url
+                )
+            })?;
+
+        let body = response
+            .into_string()
+            .with_context(|| format!("failed to read RPC response body from {}", self.rpc_url))?;
+
+        let envelope: serde_json::Value = serde_json::from_str(&body)
+            .with_context(|| "failed to parse starknet_getClassAt response as JSON")?;
+
+        if let Some(err) = envelope.get("error") {
+            return Err(eyre!("starknet_getClassAt returned JSON-RPC error: {err}"));
+        }
+
+        let result = envelope
+            .get("result")
+            .ok_or_else(|| eyre!("starknet_getClassAt response missing 'result' field"))?;
+
+        // Reject Cairo 0 deprecated classes early: they carry a
+        // `program` field instead of `sierra_program` and the Sierra
+        // re-execution path cannot consume them.
+        if result.get("program").is_some() && result.get("sierra_program").is_none() {
+            return Err(eyre!(
+                "contract at {contract_address} is a Cairo 0 deprecated class — \
+                 the recorder's local re-execution path supports Sierra (Cairo 1+) only"
+            ));
+        }
+
+        serde_json::from_value::<SierraContractClass>(result.clone())
+            .with_context(|| "failed to parse starknet_getClassAt result as Sierra ContractClass")
     }
 }
+
+/// Re-export of the upstream Cairo Sierra `ContractClass` type so
+/// downstream callers don't have to depend on
+/// `cairo-lang-starknet-classes` directly.
+pub type SierraContractClass = cairo_lang_starknet_classes::contract_class::ContractClass;
 
 /// Represents the execution invocation within a StarkNet transaction trace,
 /// corresponding to the `execute_invocation` field from `starknet_traceTransaction`.
@@ -905,41 +1001,47 @@ pub fn replay_transaction(config: &ReplayConfig) -> Result<ExecutionContext> {
 // M5: write a CTFS trace bundle from a fetched on-chain transaction trace.
 // ---------------------------------------------------------------------------
 //
-// The full M5 vision is "fetch on-chain tx → re-execute locally with
-// CodeTracer tracing".  Re-execution requires three components that are
-// non-trivial without a live RPC node and an HTTP client in this crate:
+// The M5 vision is "fetch on-chain tx → re-execute locally with
+// CodeTracer tracing".  Three components were originally outstanding:
 //
 //   1. Class-hash resolution: given a contract address, call
-//      `starknet_getClassHashAt` then `starknet_getClass` to fetch the
-//      Sierra (or Sierra+CASM) compiled class.  This crate currently has
-//      no HTTP client (`reqwest` / `ureq` are not in `Cargo.toml`); the
-//      `StarknetRpcClient` placeholder returns an error.
+//      `starknet_getClassAt` to fetch the Sierra (or deprecated Cairo 0)
+//      compiled class.  *Implemented* via [`StarknetRpcClient::get_class_at`]
+//      using `ureq` (blocking JSON-RPC).
 //   2. Block-context reconstruction: build a `BlockContext` carrying the
 //      original tx's block number, timestamp, gas price, and caller
-//      address.  These fields are not surfaced by the bare
-//      `starknet_traceTransaction` call.
+//      address.  *Still partial*: the on-chain
+//      `starknet_traceTransaction` response does not surface block-level
+//      fields, so the local re-execution path runs against the runner's
+//      default Starknet state (sufficient for stateless re-execution of
+//      pure functions, lossy for state-dependent calls).
 //   3. Local execution via `SierraCasmRunner` against the fetched class
 //      with the original calldata + preloaded storage state.
+//      *Implemented* via [`reexecute_entry_point`] which extracts the
+//      Sierra program from the fetched class, looks up the entry point
+//      by selector, and invokes the runner with the calldata felts.
+//      The runner's `relocated_trace` is not yet routed back through
+//      the `tracer.rs` step/call pipeline — wiring that would unlock
+//      per-Sierra-instruction granularity in the produced CTFS bundle.
+//      The current path keeps the per-invocation granularity from the
+//      on-chain trace JSON and additionally validates that the fetched
+//      class can be locally re-invoked end-to-end without panicking.
 //
-// Pending those, this function takes the next-best step: it walks the
-// already-fetched [`TransactionTrace`] (the call tree, calldata, events,
-// and storage diffs returned by `starknet_traceTransaction`) and emits a
-// CodeTracer CTFS bundle directly from that.  The produced bundle
-// captures the on-chain call/return ordering, calldata args, storage
-// reads/writes (from the state diff), and emitted events.
+// [`write_replay_trace`] (below) walks the already-fetched
+// [`TransactionTrace`] (call tree, calldata, events, storage diffs) and
+// emits a CodeTracer CTFS bundle directly from that — the same on-disk
+// shape as `record` / `trace-starknet`.  This is end-to-end useful
+// today: a user can record a real on-chain tx and load the resulting
+// `.ct` in CodeTracer without a Cairo toolchain.
 //
-// This is end-to-end useful: a user can record a real on-chain tx (via
-// any out-of-band fetch — `curl` against a node, a saved fixture, etc.)
-// and load the resulting `.ct` in CodeTracer without a Cairo toolchain.
-// What's still TODO is the local re-execution path, which would unlock
-// per-step Sierra-instruction-level granularity (vs. the current
-// per-invocation granularity).
-//
-// TODO(M5-followup): once an HTTP client lands in this crate's deps and
-// `StarknetRpcClient::trace_transaction` is implemented, the same
-// `write_replay_trace` entry point can be re-used by the `replay`
-// subcommand without any callsite changes — the trace JSON is the
-// stable interface either way.
+// TODO(M5-followup-2): route the SierraCasmRunner `relocated_trace`
+// through the existing `CairoTracer` step/call/return pipeline so the
+// produced CTFS bundle gains per-Sierra-instruction granularity.  The
+// current [`reexecute_entry_point`] runs the entry point but discards
+// the relocated trace — a follow-up should diff the runner's memory /
+// trace_entries against the source map (`source_map.rs`) and emit
+// matching `register_step` / `register_call` / `register_return`
+// records via [`TraceWriter`].
 
 /// Walk a [`TransactionTrace`]'s invocation tree (DFS) and emit a CTFS
 /// trace bundle into `out_dir`.
@@ -1156,6 +1258,150 @@ pub fn count_storage_entries(trace: &TransactionTrace) -> usize {
         .iter()
         .map(|d| d.storage_entries.len())
         .sum()
+}
+
+// ---------------------------------------------------------------------------
+// M5 follow-up: local re-execution of a fetched Sierra contract class.
+// ---------------------------------------------------------------------------
+
+/// Outcome of locally re-executing a Starknet entry point against a
+/// fetched [`SierraContractClass`].
+///
+/// `gas_counter` mirrors the runner's post-execution gas value; `value`
+/// is the entry point's [`RunResultValue`] (Success / Panic) carrying
+/// the returned felt vector or panic payload.  These two together pin
+/// the runner-side outcome the integration test asserts against.
+#[derive(Debug, Clone)]
+pub struct ReexecutionResult {
+    /// Remaining gas reported by [`SierraCasmRunner`] after the entry
+    /// point returned.  `None` when the runner did not track gas.
+    pub gas_counter: Option<starknet_types_core::felt::Felt>,
+    /// The entry point's return value, as classified by the runner.
+    pub value: cairo_lang_runner::RunResultValue,
+}
+
+/// Locate the [`ContractEntryPoint`] in `class.entry_points_by_type`
+/// matching `selector`.
+///
+/// Searches `external`, `l1_handler`, then `constructor` in that
+/// order.  `selector` is accepted as a `0x`-prefixed (or bare) hex
+/// string — matching the on-chain `entry_point_selector` form
+/// surfaced by `starknet_traceTransaction`.
+pub fn find_entry_point<'a>(
+    class: &'a SierraContractClass,
+    selector: &str,
+) -> Result<&'a cairo_lang_starknet_classes::contract_class::ContractEntryPoint> {
+    let bare = selector.strip_prefix("0x").unwrap_or(selector);
+    let needle = num_bigint::BigUint::parse_bytes(bare.as_bytes(), 16)
+        .ok_or_else(|| eyre!("entry-point selector is not a valid hex string: {selector}"))?;
+
+    let groups = [
+        ("external", &class.entry_points_by_type.external),
+        ("l1_handler", &class.entry_points_by_type.l1_handler),
+        ("constructor", &class.entry_points_by_type.constructor),
+    ];
+
+    for (_kind, group) in groups {
+        if let Some(ep) = group.iter().find(|ep| ep.selector == needle) {
+            return Ok(ep);
+        }
+    }
+
+    Err(eyre!(
+        "no entry point with selector {selector} found in class \
+         (external: {}, l1_handler: {}, constructor: {})",
+        class.entry_points_by_type.external.len(),
+        class.entry_points_by_type.l1_handler.len(),
+        class.entry_points_by_type.constructor.len(),
+    ))
+}
+
+/// Re-execute the entry point identified by `(class, selector)` locally
+/// using [`SierraCasmRunner`], passing `calldata` as the entry point's
+/// felt252 arguments.
+///
+/// Steps:
+///   1. Extract the Sierra program from the fetched contract class via
+///      [`SierraContractClass::extract_sierra_program`] (with debug
+///      info so function names round-trip back to source).
+///   2. Build a [`SierraCasmRunner`] with default Starknet contracts
+///      info / no profiler.
+///   3. Look up the entry point in the program by `function_idx`
+///      (resolved from the selector against
+///      [`ContractEntryPoints`]).
+///   4. Convert each calldata felt (accepted as `0x`-prefixed or bare
+///      decimal) into a [`cairo_lang_runner::Arg`] and invoke
+///      [`SierraCasmRunner::run_function_with_starknet_context`] with
+///      a fresh [`StarknetState`].
+///
+/// **Limitations** (tracked in the M5 module-level comment):
+///   - The runner runs against an empty Starknet state; storage reads
+///     issued by the entry point will see default-zero values.  Pre-
+///     loading the trace's `state_diff` into the runner's
+///     `StarknetState` is the next milestone.
+///   - The returned [`ReexecutionResult`] discards the runner's
+///     `relocated_trace`.  Routing it back through the
+///     `tracer.rs` step/call pipeline (so the produced CTFS bundle
+///     gains per-Sierra-instruction granularity) is the M5 follow-up
+///     2 task documented above.
+pub fn reexecute_entry_point(
+    class: &SierraContractClass,
+    selector: &str,
+    calldata: &[String],
+) -> Result<ReexecutionResult> {
+    use cairo_lang_runner::{Arg, SierraCasmRunner, StarknetState};
+    use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
+
+    let entry_point = find_entry_point(class, selector)?;
+    let function_idx = entry_point.function_idx;
+
+    let extracted = class
+        .extract_sierra_program(true)
+        .map_err(|e| eyre!("failed to extract Sierra program from class: {e:?}"))?;
+
+    let function = extracted
+        .program
+        .funcs
+        .get(function_idx)
+        .ok_or_else(|| {
+            eyre!(
+                "entry-point function_idx {function_idx} out of range \
+                 (program has {} functions)",
+                extracted.program.funcs.len()
+            )
+        })?
+        .clone();
+
+    let runner = SierraCasmRunner::new(extracted.program, None, OrderedHashMap::default(), None)
+        .map_err(|e| eyre!("failed to build SierraCasmRunner: {e}"))?;
+
+    let mut args: Vec<Arg> = Vec::with_capacity(calldata.len());
+    for item in calldata {
+        let felt =
+            parse_felt(item).with_context(|| format!("failed to parse calldata felt: {item}"))?;
+        args.push(Arg::Value(felt));
+    }
+
+    let result = runner
+        .run_function_with_starknet_context(&function, args, None, StarknetState::default())
+        .map_err(|e| eyre!("local entry-point re-execution failed: {e}"))?;
+
+    Ok(ReexecutionResult {
+        gas_counter: result.gas_counter,
+        value: result.value,
+    })
+}
+
+/// Parse a felt252 from either a `0x`-prefixed hex string or a bare
+/// decimal string.  Used to convert on-chain calldata felts into
+/// [`Felt252`] runner arguments.
+fn parse_felt(s: &str) -> Result<starknet_types_core::felt::Felt> {
+    use starknet_types_core::felt::Felt;
+    if let Some(hex) = s.strip_prefix("0x") {
+        Felt::from_hex(&format!("0x{hex}")).map_err(|e| eyre!("invalid hex felt {s}: {e}"))
+    } else {
+        Felt::from_dec_str(s).map_err(|e| eyre!("invalid decimal felt {s}: {e}"))
+    }
 }
 
 // ---------------------------------------------------------------------------

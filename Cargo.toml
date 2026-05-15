@@ -39,5 +39,23 @@ eyre = "0.6"
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 
+# StarkNet contract class (Sierra) types — used by the M5 replay path
+# to deserialise `starknet_getClassAt` responses and feed Sierra
+# programs into `SierraCasmRunner` for local re-execution.
+cairo-lang-starknet-classes = "2.17.0-rc.4"
+
+# Felt252 type used by `SierraCasmRunner` arguments and the on-chain
+# `entry_point_selector` value (BigUint).  Both are transitive
+# dependencies of `cairo-lang-runner` / `cairo-lang-starknet-classes`
+# but are surfaced here as direct deps for the M5 replay path.
+starknet-types-core = "0.2"
+num-bigint = "0.4"
+
+# Synchronous HTTP / JSON-RPC client used by `StarknetRpcClient` to
+# fetch on-chain transaction traces and contract classes.  `ureq` is
+# blocking and self-contained (no tokio runtime), keeping the
+# recorder's CLI start-up footprint minimal.
+ureq = { version = "2.12", default-features = false, features = ["tls", "json", "gzip"] }
+
 [dev-dependencies]
 tempfile = "3"
