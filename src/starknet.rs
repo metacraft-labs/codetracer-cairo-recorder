@@ -44,6 +44,22 @@ pub enum TraceEntry {
     ///   `false` for `"snapshot"` — pinning the @-vs-ref split that
     ///   distinguishes a state-mutating external from a read-only
     ///   view at the trace level.
+    ///
+    /// M10 round-5: optional `dispatcher_trait` field encodes the
+    /// `#[starknet::interface]` Dispatcher pattern for cross-contract
+    /// calls.  When present, the function table entry the converter
+    /// writes is `<dispatcher_trait>::<callee>::<selector>` so
+    /// consumers can group dispatcher-mediated calls under the
+    /// trait identity, and a typed `ValueRecord::String` arg named
+    /// `dispatcher_trait` is staged on the call so the trait
+    /// identity surfaces alongside the canonical caller / callee /
+    /// selector args.  Absent → the legacy `<callee>::<selector>`
+    /// (or `<visibility>::<callee>::<selector>`) form is preserved.
+    /// Mutual exclusivity: `visibility` and `dispatcher_trait` are
+    /// independent — fixtures supply one or the other depending on
+    /// whether the call is direct (visibility known) or mediated by
+    /// a dispatcher (trait known).  When both are absent the
+    /// pre-round-5 contract is preserved.
     #[serde(rename = "contract_call")]
     ContractCall {
         caller: String,
@@ -54,6 +70,8 @@ pub enum TraceEntry {
         visibility: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         self_kind: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        dispatcher_trait: String,
     },
 
     /// A storage read operation.
@@ -386,19 +404,24 @@ pub fn write_starknet_trace(
                 calldata,
                 visibility,
                 self_kind,
+                dispatcher_trait,
             } => {
                 TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
-                // M10 round-4: when the JSON entry carries a
-                // `visibility` field, prefix the function table name
-                // with the visibility class so consumers can group
-                // external / view / internal methods without
-                // re-parsing the contract source.  Absent → preserve
-                // the legacy `<callee>::<selector>` form so existing
-                // fixtures keep their pinned function-table strings.
-                let name = if visibility.is_empty() {
-                    format!("{}::{}", callee, selector)
-                } else {
+                // M10 round-4 / round-5: choose the function table
+                // name based on which optional decorator field is
+                // present.  `dispatcher_trait` (round-5) wins over
+                // `visibility` (round-4) when both are supplied —
+                // dispatcher-mediated calls cross trait boundaries
+                // and the trait identity is the more specific
+                // grouping.  Absent → preserve the legacy
+                // `<callee>::<selector>` form so existing fixtures
+                // keep their pinned function-table strings.
+                let name = if !dispatcher_trait.is_empty() {
+                    format!("{}::{}::{}", dispatcher_trait, callee, selector)
+                } else if !visibility.is_empty() {
                     format!("{}::{}::{}", visibility, callee, selector)
+                } else {
+                    format!("{}::{}", callee, selector)
                 };
                 let fn_id =
                     TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
@@ -435,6 +458,20 @@ pub fn write_starknet_trace(
                         type_id: ref_type_id,
                     };
                     let _ = TraceWriter::arg(&mut *writer, "self_kind", value);
+                }
+                // M10 round-5: when the JSON entry carries a
+                // `dispatcher_trait`, surface the trait identity as
+                // a typed `ValueRecord::String` arg so consumers can
+                // group all dispatcher-mediated calls under the
+                // trait name without re-parsing the function-table
+                // string.  Absent → no `dispatcher_trait` arg is
+                // emitted.
+                if !dispatcher_trait.is_empty() {
+                    let _ = TraceWriter::arg(
+                        &mut *writer,
+                        "dispatcher_trait",
+                        str_value(dispatcher_trait, str_type_id),
+                    );
                 }
 
                 TraceWriter::register_call(&mut *writer, fn_id, vec![]);
@@ -522,6 +559,12 @@ pub fn write_starknet_trace(
                 //   * `"u64"`     — `ValueRecord::Int` against a
                 //     dedicated `u64` type id; the value is parsed
                 //     from the JSON's decimal / `0x`-prefixed string.
+                //   * `"bool"`    — `ValueRecord::Bool` against a
+                //     dedicated `bool` type id; accepted JSON values
+                //     are `"true"` / `"false"` (case-insensitive) and
+                //     `"1"` / `"0"`.  Used by signature-verification
+                //     syscalls (e.g. `check_ecdsa_signature`) whose
+                //     return is a pure boolean.
                 //
                 // Anything else falls back to a `ValueRecord::String`
                 // so the trace stays self-describing.
@@ -561,6 +604,19 @@ pub fn write_starknet_trace(
                             i: parsed,
                             type_id: int_id,
                         }
+                    }
+                    "bool" => {
+                        let bool_id =
+                            TraceWriter::ensure_type_id(&mut *writer, TypeKind::Bool, "bool");
+                        // Accept `"true"` / `"false"` (case-insensitive)
+                        // and `"1"` / `"0"`.  Anything else parses as
+                        // false — the JSON producer is expected to use
+                        // one of the canonical forms.
+                        let b = matches!(
+                            return_value.to_ascii_lowercase().as_str(),
+                            "true" | "1"
+                        );
+                        ValueRecord::Bool { b, type_id: bool_id }
                     }
                     _ => str_value(return_value, str_type_id),
                 };
@@ -863,6 +919,7 @@ mod tests {
                 calldata: vec!["42".to_string()],
                 visibility: String::new(),
                 self_kind: String::new(),
+                dispatcher_trait: String::new(),
             },
             TraceEntry::StorageRead {
                 contract: "0x2".to_string(),
@@ -922,6 +979,7 @@ mod tests {
             calldata: vec!["0x3".to_string(), "100".to_string()],
             visibility: String::new(),
             self_kind: String::new(),
+            dispatcher_trait: String::new(),
         }];
 
         let events = convert_snforge_trace(&entries);
@@ -1047,6 +1105,7 @@ mod tests {
             calldata: vec![],
             visibility: String::new(),
             self_kind: String::new(),
+            dispatcher_trait: String::new(),
         }];
 
         let events = convert_snforge_trace(&entries);
