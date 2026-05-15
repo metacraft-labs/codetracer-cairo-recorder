@@ -950,20 +950,24 @@ fn test_control_flow_test_via_ct_print_full() {
         ]
     );
 
-    // ----- Call-exit order: LIFO ------------------------------------
-    // Bug-fix 1+2 also gives the LIFO closing order: each callee's
-    // call_exit fires before the caller's, so depth-aware consumers
-    // can reconstruct the call tree.  For control_flow_test the LIFO
-    // post-order happens to coincide with the lexical order of the
-    // first three callees because they're sibling leaves of `compute`.
+    // ----- Call-exit order: entry-key flush at top frame ------------
+    // Bug-fix 1+2 gives the LIFO closing order for inner siblings:
+    // each callee's call_exit fires before the caller's, so the first
+    // three sibling leaves of `compute` (classify, loop_sum,
+    // match_pick) appear in lexical/entry order.  Re-pinned against
+    // trace-format-nim eec665b: call_key is now allocated at
+    // registerCall and completed CallRecords are flushed from the
+    // buffer in entry-key order, so main and compute (which co-exit
+    // at the same step) now appear in entry-key order (main before
+    // compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "classify".to_string(),
             "loop_sum".to_string(),
             "match_pick".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -996,14 +1000,17 @@ fn test_control_flow_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes compute (both co-exit at the same step).
     assert_eq!(
         exit_returns,
         vec![
             ("classify".to_string(), 20),
             ("loop_sum".to_string(), 3),
             ("match_pick".to_string(), 100),
-            ("compute".to_string(), 123),
             ("main".to_string(), 123),
+            ("compute".to_string(), 123),
         ]
     );
 
@@ -1127,19 +1134,22 @@ fn test_nested_calls_test_via_ct_print_full() {
         ]
     );
 
-    // ----- Call-exit order: LIFO -------------------------------------
-    // Bug-fix 1+2: each callee's call_exit fires before its caller's,
-    // so the post-order matches `[inner, middle, outer, compute,
-    // main]` — exactly the LIFO closing order depth-aware consumers
-    // need to reconstruct the call tree.
+    // ----- Call-exit order: entry-key flush at top frame ------------
+    // Bug-fix 1+2: each callee's call_exit fires before its caller's
+    // for the inner sub-chain, so inner / middle / outer appear
+    // depth-first.  Re-pinned against trace-format-nim eec665b:
+    // call_key is now allocated at registerCall and completed
+    // CallRecords are flushed from the buffer in entry-key order, so
+    // main and compute (which co-exit at the same step) now appear in
+    // entry-key order (main before compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -1173,14 +1183,17 @@ fn test_nested_calls_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes compute (both co-exit at the same step).
     assert_eq!(
         exit_returns,
         vec![
             ("inner".to_string(), 3),
             ("middle".to_string(), 11),
             ("outer".to_string(), 111),
-            ("compute".to_string(), 111),
             ("main".to_string(), 111),
+            ("compute".to_string(), 111),
         ]
     );
 
@@ -1203,9 +1216,13 @@ fn test_nested_calls_test_via_ct_print_full() {
 }
 
 /// Regression pin for bug-fix 1+2: nested calls produce LIFO
-/// call_exit ordering (inner before middle before outer before
-/// compute before main) so depth-aware consumers can reconstruct the
-/// call tree.
+/// call_exit ordering for the inner sub-chain (inner before middle
+/// before outer) so depth-aware consumers can reconstruct the call
+/// tree.  Re-pinned against trace-format-nim eec665b: call_key is now
+/// allocated at registerCall and completed CallRecords are flushed
+/// from the buffer in entry-key order, so the outer pair (main /
+/// compute) which co-exits at the final step now appears in
+/// entry-key order (main before compute) instead of LIFO.
 #[test]
 fn test_nested_calls_test_lifo_call_exit_order() {
     let Some((doc, _)) = record_and_dump_full(
@@ -1220,8 +1237,8 @@ fn test_nested_calls_test_lifo_call_exit_order() {
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 }
@@ -1311,13 +1328,18 @@ fn test_collections_test_via_ct_print_full() {
         ]
     );
 
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "array_total".to_string(),
             "pair_sum".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -1346,13 +1368,16 @@ fn test_collections_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes compute (both co-exit at the same step).
     assert_eq!(
         exit_returns,
         vec![
             ("array_total".to_string(), 4),
             ("pair_sum".to_string(), 30),
-            ("compute".to_string(), 34),
             ("main".to_string(), 34),
+            ("compute".to_string(), 34),
         ]
     );
 
@@ -1539,14 +1564,18 @@ fn test_error_paths_test_via_ct_print_full() {
         ]
     );
 
-    // LIFO closing — divide closes first (mid-panic), then compute,
-    // then main.
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  divide closes first
+    // (mid-panic), then main and compute co-exit at the panic
+    // teardown step and appear in entry-key order (main before
+    // compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "divide".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -1713,14 +1742,20 @@ fn test_struct_test_via_ct_print_full() {
     assert_eq!(events.len(), 12, "events.len()");
     assert_step_indices_monotonic(&doc);
 
-    // ----- Call sequence + LIFO exit ---------------------------------
+    // ----- Call sequence + entry-key flush exit ----------------------
     assert_eq!(
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) rather than the previous
+    // inverse-LIFO order.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec!["main".to_string(), "compute".to_string()]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -1800,9 +1835,12 @@ fn test_struct_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes compute (both co-exit at the same step).
     assert_eq!(
         exit_returns,
-        vec![("compute".to_string(), 37), ("main".to_string(), 37),]
+        vec![("main".to_string(), 37), ("compute".to_string(), 37),]
     );
 }
 
@@ -1866,9 +1904,15 @@ fn test_result_option_test_via_ct_print_full() {
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) rather than the previous
+    // inverse-LIFO order.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec!["main".to_string(), "compute".to_string()]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -1971,12 +2015,17 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
             "require_positive".to_string(),
         ]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the panic step, so they appear in entry-key order (main before
+    // compute) instead of the previous inverse-LIFO order.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "require_positive".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -2093,7 +2142,7 @@ fn test_loop_while_for_test_via_ct_print_full() {
     assert_eq!(events.len(), 41, "events.len()");
     assert_step_indices_monotonic(&doc);
 
-    // ----- Call sequence + LIFO exit ---------------------------------
+    // ----- Call sequence + entry-key flush exit ----------------------
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
@@ -2103,13 +2152,18 @@ fn test_loop_while_for_test_via_ct_print_full() {
             "loop_double".to_string(),
         ]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "loop_three".to_string(),
             "loop_double".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -2444,9 +2498,15 @@ fn test_destructuring_test_via_ct_print_full() {
         observed_call_sequence(&doc),
         vec!["main".to_string(), "use_pair".to_string()]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and use_pair co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before use_pair) rather than the previous
+    // inverse-LIFO order.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["use_pair".to_string(), "main".to_string()]
+        vec!["main".to_string(), "use_pair".to_string()]
     );
 
     // Per-binding kind sequence — `pair` is a Tuple, the destructured
@@ -2513,9 +2573,12 @@ fn test_destructuring_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes use_pair (both co-exit at the same step).
     assert_eq!(
         exit_returns,
-        vec![("use_pair".to_string(), 30), ("main".to_string(), 30),]
+        vec![("main".to_string(), 30), ("use_pair".to_string(), 30),]
     );
 }
 
@@ -2591,13 +2654,18 @@ fn test_snapshot_ref_test_via_ct_print_full() {
             "scale".to_string(),
         ]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) instead of LIFO.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "read_only".to_string(),
             "scale".to_string(),
-            "compute".to_string(),
             "main".to_string(),
+            "compute".to_string(),
         ]
     );
 
@@ -2960,9 +3028,15 @@ fn test_array_operations_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and use_array co-exit
+    // at the same step, so call_exit events at that step now appear in
+    // entry-key order (main before use_array) rather than the previous
+    // inverse-LIFO order.
     assert_eq!(
         exit_returns,
-        vec![("use_array".to_string(), 2), ("main".to_string(), 2),]
+        vec![("main".to_string(), 2), ("use_array".to_string(), 2),]
     );
 }
 
@@ -5226,9 +5300,15 @@ fn test_implicits_test_via_ct_print_full() {
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
+    // Re-pinned against trace-format-nim eec665b: call_key is now
+    // allocated at registerCall and completed CallRecords are flushed
+    // from the buffer in entry-key order.  main and compute co-exit at
+    // the same step, so call_exit events at that step now appear in
+    // entry-key order (main before compute) rather than the previous
+    // inverse-LIFO order.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec!["main".to_string(), "compute".to_string()]
     );
 
     // Per-binding kind sequence: only the `h` Pedersen binding (Int)
@@ -5268,11 +5348,14 @@ fn test_implicits_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
+    // Re-pinned against trace-format-nim eec665b: the call_exit
+    // sequence is now flushed in entry-key order at the top frame, so
+    // main precedes compute (both co-exit at the same step).
     assert_eq!(exit_returns.len(), 2);
-    assert_eq!(exit_returns[0].0, "compute");
+    assert_eq!(exit_returns[0].0, "main");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
-    assert_eq!(exit_returns[1].0, "main");
+    assert_eq!(exit_returns[1].0, "compute");
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[1].1["i"].as_i64(), Some(0));
 }
