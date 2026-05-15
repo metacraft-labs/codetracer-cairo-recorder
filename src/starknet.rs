@@ -612,11 +612,11 @@ pub fn write_starknet_trace(
                         // and `"1"` / `"0"`.  Anything else parses as
                         // false — the JSON producer is expected to use
                         // one of the canonical forms.
-                        let b = matches!(
-                            return_value.to_ascii_lowercase().as_str(),
-                            "true" | "1"
-                        );
-                        ValueRecord::Bool { b, type_id: bool_id }
+                        let b = matches!(return_value.to_ascii_lowercase().as_str(), "true" | "1");
+                        ValueRecord::Bool {
+                            b,
+                            type_id: bool_id,
+                        }
                     }
                     _ => str_value(return_value, str_type_id),
                 };
@@ -899,6 +899,263 @@ pub fn replay_transaction(config: &ReplayConfig) -> Result<ExecutionContext> {
     }
 
     Ok(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// M5: write a CTFS trace bundle from a fetched on-chain transaction trace.
+// ---------------------------------------------------------------------------
+//
+// The full M5 vision is "fetch on-chain tx → re-execute locally with
+// CodeTracer tracing".  Re-execution requires three components that are
+// non-trivial without a live RPC node and an HTTP client in this crate:
+//
+//   1. Class-hash resolution: given a contract address, call
+//      `starknet_getClassHashAt` then `starknet_getClass` to fetch the
+//      Sierra (or Sierra+CASM) compiled class.  This crate currently has
+//      no HTTP client (`reqwest` / `ureq` are not in `Cargo.toml`); the
+//      `StarknetRpcClient` placeholder returns an error.
+//   2. Block-context reconstruction: build a `BlockContext` carrying the
+//      original tx's block number, timestamp, gas price, and caller
+//      address.  These fields are not surfaced by the bare
+//      `starknet_traceTransaction` call.
+//   3. Local execution via `SierraCasmRunner` against the fetched class
+//      with the original calldata + preloaded storage state.
+//
+// Pending those, this function takes the next-best step: it walks the
+// already-fetched [`TransactionTrace`] (the call tree, calldata, events,
+// and storage diffs returned by `starknet_traceTransaction`) and emits a
+// CodeTracer CTFS bundle directly from that.  The produced bundle
+// captures the on-chain call/return ordering, calldata args, storage
+// reads/writes (from the state diff), and emitted events.
+//
+// This is end-to-end useful: a user can record a real on-chain tx (via
+// any out-of-band fetch — `curl` against a node, a saved fixture, etc.)
+// and load the resulting `.ct` in CodeTracer without a Cairo toolchain.
+// What's still TODO is the local re-execution path, which would unlock
+// per-step Sierra-instruction-level granularity (vs. the current
+// per-invocation granularity).
+//
+// TODO(M5-followup): once an HTTP client lands in this crate's deps and
+// `StarknetRpcClient::trace_transaction` is implemented, the same
+// `write_replay_trace` entry point can be re-used by the `replay`
+// subcommand without any callsite changes — the trace JSON is the
+// stable interface either way.
+
+/// Walk a [`TransactionTrace`]'s invocation tree (DFS) and emit a CTFS
+/// trace bundle into `out_dir`.
+///
+/// The bundle is written as the canonical multi-stream `.ct` container
+/// plus `trace_metadata.json` / `trace_paths.json` sidecars, mirroring
+/// the output of the `record` and `trace-starknet` subcommands.
+///
+/// Each invocation in the tree produces a Call/Return frame named
+/// `<contract_address>::<entry_point_selector>`, with calldata felts
+/// staged as canonical call args (`calldata0`, `calldata1`, …) and one
+/// `Step` event per invocation.  Nested `calls` are walked recursively
+/// so the on-chain call depth is preserved in the trace.
+///
+/// Storage diffs from the transaction's `state_diff` surface as
+/// `EventLogKind::Write` special events at the top level after the
+/// invocation walk — they are post-tx state, not per-call effects, so
+/// pinning them to the post-walk position keeps the call-tree shape
+/// faithful to the on-chain ordering.
+///
+/// Emitted events from each invocation surface as
+/// `EventLogKind::EvmEvent` special events inside the invocation's
+/// frame (mirroring the `write_starknet_trace` contract for the
+/// snforge `Event` arm).
+///
+/// `tx_hash` is recorded in the trace's path name so the output bundle
+/// is identifiable as belonging to a specific on-chain transaction.
+pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Path) -> Result<()> {
+    // Use the tx hash as the synthetic "program path" — there is no
+    // local source file for an on-chain transaction.  Downstream
+    // consumers display this in the trace metadata, and it gives the
+    // bundle a stable identity tied to the tx itself.
+    let synthetic_path = PathBuf::from(format!("starknet-tx://{}", tx_hash));
+
+    let format = TraceEventsFileFormat::Ctfs;
+    let program_str = synthetic_path.to_string_lossy();
+    let mut writer = create_trace_writer(&program_str, &[], format);
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
+
+    let events_path = out_dir.join("trace.ctfs");
+    let metadata_path = out_dir.join("trace_metadata.json");
+    let paths_path = out_dir.join("trace_paths.json");
+
+    TraceWriter::begin_writing_trace_events(&mut *writer, &events_path)
+        .map_err(|e| eyre!("{e}"))?;
+    TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path)
+        .map_err(|e| eyre!("{e}"))?;
+    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).map_err(|e| eyre!("{e}"))?;
+
+    TraceWriter::start(&mut *writer, &synthetic_path, Line(1));
+
+    let str_type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::String, "felt252");
+
+    // Walk the invocation tree DFS, emitting a Call/Step/Return per
+    // invocation.  `line` is a synthetic counter assigned in invocation
+    // visit order — the invocation tree is the only structure we have
+    // (no source-line mapping for an on-chain tx).
+    let mut line_counter: u32 = 1;
+    write_invocation(
+        &mut *writer,
+        &synthetic_path,
+        &trace.execute_invocation,
+        str_type_id,
+        &mut line_counter,
+    );
+
+    // Storage diffs are post-tx state — emit them as Write special
+    // events after the invocation walk so the call tree stays clean.
+    if let Some(ref state_diff) = trace.state_diff {
+        for storage_diff in &state_diff.storage_diffs {
+            for entry in &storage_diff.storage_entries {
+                let metadata = "StorageWrite";
+                let content = format!("{}:{}={}", storage_diff.address, entry.key, entry.value);
+                TraceWriter::register_special_event(
+                    &mut *writer,
+                    EventLogKind::Write,
+                    metadata,
+                    &content,
+                );
+            }
+        }
+    }
+
+    TraceWriter::finish_writing_trace_events(&mut *writer).map_err(|e| eyre!("{e}"))?;
+    TraceWriter::finish_writing_trace_metadata(&mut *writer).map_err(|e| eyre!("{e}"))?;
+    TraceWriter::finish_writing_trace_paths(&mut *writer).map_err(|e| eyre!("{e}"))?;
+    writer.close().map_err(|e| eyre!("{e}"))?;
+
+    Ok(())
+}
+
+/// DFS helper for `write_replay_trace`: emit a Call/Step/Return frame
+/// for one invocation, then recurse into its nested `calls`.
+///
+/// The Call frame's name is `<contract>::<selector>`, calldata felts
+/// are staged as `calldata{N}` args, and the invocation's emitted
+/// events surface as `EventLogKind::EvmEvent` special events inside
+/// the frame so the on-chain call → event ordering is preserved.
+fn write_invocation(
+    writer: &mut dyn TraceWriter,
+    synthetic_path: &Path,
+    invocation: &InvocationTrace,
+    str_type_id: codetracer_trace_types::TypeId,
+    line_counter: &mut u32,
+) {
+    let line = *line_counter;
+    *line_counter += 1;
+
+    TraceWriter::register_step(writer, synthetic_path, Line(line as i64));
+
+    let name = format!(
+        "{}::{}",
+        invocation.contract_address, invocation.entry_point_selector
+    );
+    let fn_id = TraceWriter::ensure_function_id(writer, &name, synthetic_path, Line(1));
+
+    // Stage caller / contract / selector / each calldata felt as args.
+    let _ = TraceWriter::arg(
+        writer,
+        "caller",
+        str_value(&invocation.caller_address, str_type_id),
+    );
+    let _ = TraceWriter::arg(
+        writer,
+        "contract",
+        str_value(&invocation.contract_address, str_type_id),
+    );
+    let _ = TraceWriter::arg(
+        writer,
+        "selector",
+        str_value(&invocation.entry_point_selector, str_type_id),
+    );
+    for (idx, item) in invocation.calldata.iter().enumerate() {
+        let _ = TraceWriter::arg(
+            writer,
+            &format!("calldata{idx}"),
+            str_value(item, str_type_id),
+        );
+    }
+
+    TraceWriter::register_call(writer, fn_id, vec![]);
+
+    // Surface the invocation's emitted events inside the frame so the
+    // call → event ordering matches the on-chain trace.
+    for event in &invocation.events {
+        let metadata = format!("StarknetEvent:{}", invocation.contract_address);
+        let content = format!(
+            "{metadata} keys=[{}] data=[{}]",
+            event.keys.join(", "),
+            event.data.join(", "),
+        );
+        TraceWriter::register_special_event(writer, EventLogKind::EvmEvent, &metadata, &content);
+    }
+
+    // Recurse into nested invocations BEFORE the return — this preserves
+    // on-chain call depth in the trace's call/return nesting.
+    for nested in &invocation.calls {
+        write_invocation(writer, synthetic_path, nested, str_type_id, line_counter);
+    }
+
+    // Surface the result felts as a string-typed return record so the
+    // top-of-call-stack value is recoverable.  Multiple felts collapse
+    // into a single comma-joined string — the typed multi-felt encoding
+    // would require a Sequence type registered against felt252, which
+    // is overkill for the M5 minimum.
+    let return_record = if invocation.result.is_empty() {
+        NONE_VALUE
+    } else {
+        str_value(&invocation.result.join(","), str_type_id)
+    };
+    TraceWriter::register_return(writer, return_record);
+}
+
+/// Count the total number of invocations in a [`TransactionTrace`]'s
+/// call tree (DFS).  Exposed for test-pinning the Call/Step/Return
+/// counts emitted by [`write_replay_trace`] without re-walking the
+/// invocation tree in test code.
+pub fn count_invocations(trace: &TransactionTrace) -> usize {
+    fn walk(invocation: &InvocationTrace) -> usize {
+        let mut total = 1;
+        for nested in &invocation.calls {
+            total += walk(nested);
+        }
+        total
+    }
+    walk(&trace.execute_invocation)
+}
+
+/// Count the total number of emitted events across every invocation
+/// in a [`TransactionTrace`]'s call tree (DFS).  Exposed for test
+/// pinning of the per-invocation `EventLogKind::EvmEvent` count.
+pub fn count_events(trace: &TransactionTrace) -> usize {
+    fn walk(invocation: &InvocationTrace) -> usize {
+        let mut total = invocation.events.len();
+        for nested in &invocation.calls {
+            total += walk(nested);
+        }
+        total
+    }
+    walk(&trace.execute_invocation)
+}
+
+/// Count the total number of storage-diff entries across every
+/// contract in a [`TransactionTrace`]'s state diff.  Exposed for test
+/// pinning of the post-walk `EventLogKind::Write` count.
+pub fn count_storage_entries(trace: &TransactionTrace) -> usize {
+    let Some(ref state_diff) = trace.state_diff else {
+        return 0;
+    };
+    state_diff
+        .storage_diffs
+        .iter()
+        .map(|d| d.storage_entries.len())
+        .sum()
 }
 
 // ---------------------------------------------------------------------------

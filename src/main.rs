@@ -146,6 +146,23 @@ struct ReplayArgs {
     /// Optional directory containing contract source code for source-level tracing.
     #[arg(long)]
     source_dir: Option<PathBuf>,
+
+    /// Optional path to a saved `starknet_traceTransaction` JSON response.
+    ///
+    /// When supplied, the replay reads the trace JSON from this file
+    /// instead of calling the live RPC node.  This is the offline
+    /// fallback used by integration tests and by users who captured a
+    /// trace out-of-band (e.g. via `curl`).  When omitted, the
+    /// recorder attempts to fetch from `--rpc-url` (currently a stub
+    /// that returns an error — see `StarknetRpcClient::trace_transaction`).
+    #[arg(long)]
+    trace_file: Option<PathBuf>,
+
+    /// Directory where the replay trace bundle (.ct + sidecars) will
+    /// be written.  Falls back to `CODETRACER_CAIRO_RECORDER_OUT_DIR`
+    /// when omitted, then to `./ct-traces/`.
+    #[arg(short = 'o', long)]
+    out_dir: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,32 +251,84 @@ fn trace_starknet(args: TraceStarknetArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Execute the `replay` subcommand.
+///
+/// M5 (2026-05): the replay path is now end-to-end for the trace-write
+/// half of the pipeline.  Given a [`TransactionTrace`] (from either a
+/// live RPC node or a saved JSON fixture via `--trace-file`), the
+/// recorder walks the invocation tree and writes a CodeTracer CTFS
+/// bundle to `--out-dir` — the same on-disk shape as `record` and
+/// `trace-starknet`.
+///
+/// What's still TODO (see the module-level comment on
+/// `write_replay_trace` in `src/starknet.rs`):
+///   - Live RPC fetching (`StarknetRpcClient::trace_transaction` is a
+///     stub — needs an HTTP client + JSON-RPC plumbing).
+///   - Class-hash → compiled-Sierra resolution and local re-execution
+///     via `SierraCasmRunner` (would unlock per-Sierra-instruction
+///     granularity vs. the current per-invocation granularity).
 fn replay(args: ReplayArgs) -> Result<()> {
     let config = codetracer_cairo_recorder::starknet::ReplayConfig {
-        tx_hash: args.tx_hash,
-        rpc_url: args.rpc_url,
+        tx_hash: args.tx_hash.clone(),
+        rpc_url: args.rpc_url.clone(),
         source_dir: args.source_dir,
     };
 
-    match codetracer_cairo_recorder::starknet::replay_transaction(&config) {
-        Ok(ctx) => {
-            eprintln!("Replay complete.");
-            eprintln!("  Contract: {}", ctx.contract_address);
-            eprintln!("  Selector: {}", ctx.entry_point_selector);
-            eprintln!("  Calldata items: {}", ctx.calldata.len());
-            eprintln!("  Storage entries: {}", ctx.storage_state.len());
-            // TODO(M5): Re-execute the transaction with CodeTracer tracing
-            // once we have contract artifact resolution and local execution.
-            eprintln!("Note: local re-execution with tracing is not yet implemented.");
-            Ok(())
+    // Source the [`TransactionTrace`] from either the saved fixture
+    // (`--trace-file`) or — when an HTTP client is available — the
+    // live RPC node.  Today only the fixture path is exercisable
+    // end-to-end; the live path falls through to the placeholder
+    // error documented on `StarknetRpcClient::trace_transaction`.
+    let trace = if let Some(ref path) = args.trace_file {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read trace file: {}", path.display()))?;
+        codetracer_cairo_recorder::starknet::TransactionTrace::from_json(&content)?
+    } else {
+        // Surface the same context as the fetch-only path so the
+        // existing CLI contract is preserved.
+        let result = codetracer_cairo_recorder::starknet::replay_transaction(&config);
+        match result {
+            Ok(_ctx) => {
+                // The fetch path returned an `ExecutionContext`, not the
+                // raw `TransactionTrace`.  We re-fetch and parse so the
+                // write path has the full invocation tree.  In practice
+                // this branch is unreachable today because
+                // `StarknetRpcClient::trace_transaction` is a stub.
+                let client =
+                    codetracer_cairo_recorder::starknet::StarknetRpcClient::new(&config.rpc_url);
+                client.trace_transaction(&config.tx_hash)?
+            }
+            Err(e) => {
+                eprintln!("Replay fetch failed: {e}");
+                eprintln!("Note: live RPC fetching is not yet implemented.");
+                eprintln!(
+                    "Workaround: capture the `starknet_traceTransaction` response \
+                     to a file and pass it via `--trace-file <path>`."
+                );
+                return Err(e);
+            }
         }
-        Err(e) => {
-            eprintln!("Replay failed: {e}");
-            eprintln!("Note: the replay subcommand requires a live StarkNet RPC node.");
-            eprintln!("This is expected when running without network access.");
-            Err(e)
-        }
+    };
+
+    let ctx = codetracer_cairo_recorder::starknet::reconstruct_execution_context(&trace);
+    eprintln!("Reconstructed execution context:");
+    eprintln!("  Contract: {}", ctx.contract_address);
+    eprintln!("  Selector: {}", ctx.entry_point_selector);
+    eprintln!("  Calldata items: {}", ctx.calldata.len());
+    eprintln!("  Storage entries: {}", ctx.storage_state.len());
+
+    if recording_disabled() {
+        eprintln!("{ENV_DISABLED} is set; skipping trace recording (no output written).");
+        return Ok(());
     }
+
+    let out_dir = resolve_out_dir(args.out_dir);
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
+
+    codetracer_cairo_recorder::starknet::write_replay_trace(&args.tx_hash, &trace, &out_dir)?;
+
+    eprintln!("Replay trace written to {}", out_dir.display());
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
