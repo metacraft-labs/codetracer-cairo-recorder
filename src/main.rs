@@ -252,20 +252,24 @@ fn trace_starknet(args: TraceStarknetArgs) -> Result<()> {
 
 /// Execute the `replay` subcommand.
 ///
-/// M5 (2026-05): the replay path is now end-to-end for the trace-write
-/// half of the pipeline.  Given a [`TransactionTrace`] (from either a
-/// live RPC node or a saved JSON fixture via `--trace-file`), the
-/// recorder walks the invocation tree and writes a CodeTracer CTFS
-/// bundle to `--out-dir` — the same on-disk shape as `record` and
-/// `trace-starknet`.
+/// M5 (2026-05): the replay path is now end-to-end for the
+/// trace-write half of the pipeline and live for the JSON-RPC fetch
+/// half.  Given a [`TransactionTrace`] (from either a live RPC node
+/// via `starknet_traceTransaction` or a saved JSON fixture via
+/// `--trace-file`), the recorder walks the invocation tree and writes
+/// a CodeTracer CTFS bundle to `--out-dir` — the same on-disk shape
+/// as `record` and `trace-starknet`.
 ///
-/// What's still TODO (see the module-level comment on
-/// `write_replay_trace` in `src/starknet.rs`):
-///   - Live RPC fetching (`StarknetRpcClient::trace_transaction` is a
-///     stub — needs an HTTP client + JSON-RPC plumbing).
-///   - Class-hash → compiled-Sierra resolution and local re-execution
-///     via `SierraCasmRunner` (would unlock per-Sierra-instruction
-///     granularity vs. the current per-invocation granularity).
+/// When no `--trace-file` is supplied the recorder additionally
+/// fetches the contract class at `execute_invocation.contract_address`
+/// via `starknet_getClassAt` and re-executes the entry point locally
+/// using [`SierraCasmRunner`] (see `reexecute_entry_point`).  This
+/// validates that the on-chain class is reproducible from the recorder
+/// side; the re-execution outcome is logged to stderr but does not
+/// (yet) feed back into the produced CTFS bundle.  Routing the
+/// runner's `relocated_trace` through the existing `tracer.rs` step /
+/// call pipeline is the M5 follow-up 2 task documented in
+/// `src/starknet.rs`.
 fn replay(args: ReplayArgs) -> Result<()> {
     let config = codetracer_cairo_recorder::starknet::ReplayConfig {
         tx_hash: args.tx_hash.clone(),
@@ -274,39 +278,22 @@ fn replay(args: ReplayArgs) -> Result<()> {
     };
 
     // Source the [`TransactionTrace`] from either the saved fixture
-    // (`--trace-file`) or — when an HTTP client is available — the
-    // live RPC node.  Today only the fixture path is exercisable
-    // end-to-end; the live path falls through to the placeholder
-    // error documented on `StarknetRpcClient::trace_transaction`.
+    // (`--trace-file`) or the live RPC node via
+    // `starknet_traceTransaction`.  Both paths hand the same
+    // [`TransactionTrace`] struct to the downstream write / re-execute
+    // pipeline so the on-disk bundle shape is identical regardless of
+    // origin.
     let trace = if let Some(ref path) = args.trace_file {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read trace file: {}", path.display()))?;
         codetracer_cairo_recorder::starknet::TransactionTrace::from_json(&content)?
     } else {
-        // Surface the same context as the fetch-only path so the
-        // existing CLI contract is preserved.
-        let result = codetracer_cairo_recorder::starknet::replay_transaction(&config);
-        match result {
-            Ok(_ctx) => {
-                // The fetch path returned an `ExecutionContext`, not the
-                // raw `TransactionTrace`.  We re-fetch and parse so the
-                // write path has the full invocation tree.  In practice
-                // this branch is unreachable today because
-                // `StarknetRpcClient::trace_transaction` is a stub.
-                let client =
-                    codetracer_cairo_recorder::starknet::StarknetRpcClient::new(&config.rpc_url);
-                client.trace_transaction(&config.tx_hash)?
-            }
-            Err(e) => {
-                eprintln!("Replay fetch failed: {e}");
-                eprintln!("Note: live RPC fetching is not yet implemented.");
-                eprintln!(
-                    "Workaround: capture the `starknet_traceTransaction` response \
-                     to a file and pass it via `--trace-file <path>`."
-                );
-                return Err(e);
-            }
-        }
+        let client = codetracer_cairo_recorder::starknet::StarknetRpcClient::new(&config.rpc_url);
+        eprintln!(
+            "Fetching trace for tx {} via {} ...",
+            config.tx_hash, config.rpc_url
+        );
+        client.trace_transaction(&config.tx_hash)?
     };
 
     let ctx = codetracer_cairo_recorder::starknet::reconstruct_execution_context(&trace);
@@ -315,6 +302,37 @@ fn replay(args: ReplayArgs) -> Result<()> {
     eprintln!("  Selector: {}", ctx.entry_point_selector);
     eprintln!("  Calldata items: {}", ctx.calldata.len());
     eprintln!("  Storage entries: {}", ctx.storage_state.len());
+
+    // Live path: also fetch the contract class and locally re-execute
+    // the entry point.  Skipped when running offline against a fixture
+    // (no RPC node is reachable to fetch the class from).
+    if args.trace_file.is_none() {
+        let client = codetracer_cairo_recorder::starknet::StarknetRpcClient::new(&config.rpc_url);
+        let block_id = serde_json::json!("latest");
+        eprintln!(
+            "Fetching contract class at {} for local re-execution ...",
+            ctx.contract_address
+        );
+        match client.get_class_at(&block_id, &ctx.contract_address) {
+            Ok(class) => {
+                match codetracer_cairo_recorder::starknet::reexecute_entry_point(
+                    &class,
+                    &ctx.entry_point_selector,
+                    &ctx.calldata,
+                ) {
+                    Ok(result) => {
+                        eprintln!("Local re-execution succeeded: {:?}", result.value);
+                    }
+                    Err(e) => {
+                        eprintln!("Local re-execution skipped (non-fatal): {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Class fetch skipped (non-fatal): {e}");
+            }
+        }
+    }
 
     if recording_disabled() {
         eprintln!("{ENV_DISABLED} is set; skipping trace recording (no output written).");
