@@ -360,14 +360,9 @@ pub fn write_starknet_trace(
     // CTFS multi-stream container.
     let events_filename = "trace.ctfs";
     let events_path = out_dir.join(events_filename);
-    let metadata_path = out_dir.join("trace_metadata.json");
-    let paths_path = out_dir.join("trace_paths.json");
 
     TraceWriter::begin_writing_trace_events(&mut *writer, &events_path)
         .map_err(|e| eyre!("{e}"))?;
-    TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path)
-        .map_err(|e| eyre!("{e}"))?;
-    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).map_err(|e| eyre!("{e}"))?;
 
     TraceWriter::start(&mut *writer, trace_path, Line(1));
 
@@ -664,8 +659,9 @@ pub fn write_starknet_trace(
     }
 
     TraceWriter::finish_writing_trace_events(&mut *writer).map_err(|e| eyre!("{e}"))?;
-    TraceWriter::finish_writing_trace_metadata(&mut *writer).map_err(|e| eyre!("{e}"))?;
-    TraceWriter::finish_writing_trace_paths(&mut *writer).map_err(|e| eyre!("{e}"))?;
+    writer
+        .write_meta_dat("codetracer-cairo-recorder")
+        .map_err(|e| eyre!("{e}"))?;
     writer.close().map_err(|e| eyre!("{e}"))?;
 
     Ok(())
@@ -1084,14 +1080,9 @@ pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Pat
         .with_context(|| format!("cannot create output dir: {}", out_dir.display()))?;
 
     let events_path = out_dir.join("trace.ctfs");
-    let metadata_path = out_dir.join("trace_metadata.json");
-    let paths_path = out_dir.join("trace_paths.json");
 
     TraceWriter::begin_writing_trace_events(&mut *writer, &events_path)
         .map_err(|e| eyre!("{e}"))?;
-    TraceWriter::begin_writing_trace_metadata(&mut *writer, &metadata_path)
-        .map_err(|e| eyre!("{e}"))?;
-    TraceWriter::begin_writing_trace_paths(&mut *writer, &paths_path).map_err(|e| eyre!("{e}"))?;
 
     TraceWriter::start(&mut *writer, &synthetic_path, Line(1));
 
@@ -1128,8 +1119,9 @@ pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Pat
     }
 
     TraceWriter::finish_writing_trace_events(&mut *writer).map_err(|e| eyre!("{e}"))?;
-    TraceWriter::finish_writing_trace_metadata(&mut *writer).map_err(|e| eyre!("{e}"))?;
-    TraceWriter::finish_writing_trace_paths(&mut *writer).map_err(|e| eyre!("{e}"))?;
+    writer
+        .write_meta_dat("codetracer-cairo-recorder")
+        .map_err(|e| eyre!("{e}"))?;
     writer.close().map_err(|e| eyre!("{e}"))?;
 
     Ok(())
