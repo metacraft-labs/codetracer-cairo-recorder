@@ -1,0 +1,4 @@
+# Local build artifacts produced by packaging/build-all.sh.
+# The .deb / .rpm / formula files here are reproducible; the
+# publish workflows rebuild them in CI before uploading.
+dist/
