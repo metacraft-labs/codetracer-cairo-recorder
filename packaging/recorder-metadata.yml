@@ -1,0 +1,54 @@
+# Per-recorder packaging metadata for codetracer-cairo-recorder.
+#
+# Consumed by codetracer-launcher's
+# packaging/recorder-templates/generate.py. The generator reads this
+# file and emits packaging/{homebrew,nix,aur,deb,rpm}/ here, ready
+# to be picked up by the M11 publish-*.yml workflows under
+# .github/workflows/.
+#
+# When bumping a field below, re-run the generator:
+#
+#   python ../codetracer-launcher/packaging/recorder-templates/generate.py \
+#     --metadata packaging/recorder-metadata.yml \
+#     --out packaging
+#
+# and commit the regenerated files.
+
+recorder:
+  name: codetracer-cairo-recorder
+  binary-name: codetracer-cairo-recorder
+  description: CodeTracer recorder for Cairo and StarkNet smart contracts
+  homepage: https://github.com/metacraft-labs/codetracer-cairo-recorder
+  repo: metacraft-labs/codetracer-cairo-recorder
+  version: 0.1.0
+  license: Apache-2.0
+
+build:
+  # The cargo binary target (matches `[[bin]] name = ...` in Cargo.toml).
+  cargo-bin-target: codetracer-cairo-recorder
+  # The flake target that produces the recorder. The Cairo recorder
+  # flake currently only exposes devShells; M11's nix template falls
+  # back to building via `rustPlatform.buildRustPackage` from the
+  # Cargo.lock pin.
+  nix-flake-target: ".#default"
+
+dependencies:
+  # Debian + Ubuntu runtime deps. zstd is required by the Nim
+  # codetracer-trace-writer FFI the recorder links against.
+  deb:
+    - libc6
+    - libzstd1
+  # RPM runtime deps. libzstd is `libzstd` on Fedora.
+  rpm:
+    - glibc
+    - libzstd
+  # AUR runtime deps.
+  aur:
+    - glibc
+    - zstd
+  # Nix derivation buildInputs.
+  nix:
+    - zstd
+  # Homebrew runtime deps.
+  homebrew:
+    - zstd
