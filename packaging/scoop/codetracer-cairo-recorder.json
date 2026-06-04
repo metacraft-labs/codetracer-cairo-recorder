@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "description": "CodeTracer recorder for Cairo and StarkNet smart contracts",
+  "homepage": "https://github.com/metacraft-labs/codetracer-cairo-recorder",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/metacraft-labs/codetracer-cairo-recorder/releases/download/v0.1.0/codetracer-cairo-recorder-0.1.0-windows-x86_64.zip",
+      "hash": "REPLACE_AT_PUBLISH_TIME_windows_x86_64"
+    }
+  },
+  "bin": "codetracer-cairo-recorder.exe",
+  "checkver": {
+    "github": "https://github.com/metacraft-labs/codetracer-cairo-recorder"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/metacraft-labs/codetracer-cairo-recorder/releases/download/v$version/codetracer-cairo-recorder-$version-windows-x86_64.zip"
+      }
+    }
+  }
+}
