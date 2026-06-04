@@ -262,7 +262,8 @@ impl CairoTracer {
 
         // -- 9. Finish writing --------------------------------------------------------
         TraceWriter::finish_writing_trace_events(&mut *tracer.writer).map_err(|e| eyre!("{e}"))?;
-        tracer.writer
+        tracer
+            .writer
             .write_meta_dat("codetracer-cairo-recorder")
             .map_err(|e| eyre!("{e}"))?;
         tracer.writer.close().map_err(|e| eyre!("{e}"))?;
