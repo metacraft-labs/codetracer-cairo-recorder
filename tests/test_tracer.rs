@@ -5395,10 +5395,7 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     // DFS visit order from main: main → add_test → sub_test →
     // mul_test.  Each `#[test]`-shaped helper surfaces as its own
     // function frame.
-    assert_eq!(
-        bare_fns,
-        vec!["main", "add_test", "sub_test", "mul_test"]
-    );
+    assert_eq!(bare_fns, vec!["main", "add_test", "sub_test", "mul_test"]);
 
     // Type table: only the shared felt252 carrier — every helper
     // returns a felt252 and no composite types are constructed.
