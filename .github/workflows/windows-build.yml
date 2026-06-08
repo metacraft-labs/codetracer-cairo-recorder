@@ -46,6 +46,30 @@ jobs:
             git -C "${target}" checkout "${TF_REF}"
           fi
 
+      - name: Clone codetracer-trace-format-nim (Nim FFI entry point)
+        # codetracer_trace_writer_nim's build.rs reads
+        # ``../codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim``
+        # at cargo compile time and panics without it.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PINS=".github/sibling-pins"
+          TFN_REF="main"
+          if [ -f "${PINS}" ]; then
+            PIN="$(grep '^codetracer-trace-format-nim ' "${PINS}" | cut -d' ' -f2)" || true
+            [ -n "${PIN}" ] && TFN_REF="${PIN}"
+          fi
+          CLONE_URL="https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
+          target="${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          rm -rf "${target}"
+          if ! git clone --depth 1 --branch "${TFN_REF}" --single-branch \
+            "${CLONE_URL}" "${target}" 2>/dev/null; then
+            rm -rf "${target}"
+            git clone --no-checkout "${CLONE_URL}" "${target}"
+            git -C "${target}" checkout "${TFN_REF}"
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
       - name: Install capnproto
         shell: pwsh
