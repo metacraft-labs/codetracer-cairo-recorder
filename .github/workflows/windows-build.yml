@@ -74,6 +74,17 @@ jobs:
       - name: Install capnproto
         shell: pwsh
         run: choco install capnproto -y
+      - name: Install Nim toolchain
+        # codetracer_trace_writer_nim's build.rs invokes ``nimble
+        # install --depsOnly`` to resolve the .nimble requires
+        # before compiling the FFI sources, so plain ``cargo check``
+        # needs nimble on PATH alongside nim.
+        shell: pwsh
+        run: |
+          choco install nim -y
+          $nimBin = (Get-ChildItem -Path "C:\tools\Nim\nim-*\bin" -Directory | Select-Object -First 1).FullName
+          if ($nimBin) { Add-Content -Path $env:GITHUB_PATH -Value $nimBin }
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.nimble\bin"
       - name: Download Cairo corelib
         shell: pwsh
         run: |
