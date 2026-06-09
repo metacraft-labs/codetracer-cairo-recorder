@@ -1795,8 +1795,8 @@ fn collect_array_appends(lines: &[&str], start: usize, end: usize, name: &str) -
     let mut elements = Vec::new();
     let mut last_append_line = 0u32;
     let append_prefix = format!("{name}.append(");
-    for k in start..=end {
-        let trimmed = lines[k].trim();
+    for (k, line) in lines.iter().enumerate().take(end + 1).skip(start) {
+        let trimmed = line.trim();
         if !trimmed.starts_with(&append_prefix) {
             continue;
         }
@@ -2360,8 +2360,8 @@ fn build_function_table(source: &str, user_functions: &[&str]) -> Vec<FunctionEn
     let mut entries = Vec::new();
     for (start, end, bare_name, full_name) in prelim {
         let mut callees_per_line: Vec<Vec<String>> = Vec::with_capacity(end - start + 1);
-        for k in start..=end {
-            callees_per_line.push(parse_callees_in_line(lines[k], &bare_callee_refs));
+        for line in lines.iter().take(end + 1).skip(start) {
+            callees_per_line.push(parse_callees_in_line(line, &bare_callee_refs));
         }
 
         let while_loops = parse_while_loops(&lines, start, end);
@@ -2404,7 +2404,7 @@ fn impl_block_ranges(lines: &[&str]) -> Vec<(usize, usize, String)> {
         // Pull the impl name — everything up to the first whitespace /
         // generic / `of` keyword.
         let stop = after_impl
-            .find(|c: char| c == ' ' || c == '<' || c == ':')
+            .find([' ', '<', ':'])
             .unwrap_or(after_impl.len());
         let impl_name = after_impl[..stop].trim().to_string();
         // Must contain ` of ` to be a trait impl (not a free impl block).
