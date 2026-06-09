@@ -199,9 +199,8 @@ pub enum TraceEvent {
 /// (starting at 1) so that the CodeTracer UI can display them in order.
 pub fn convert_snforge_trace(entries: &[TraceEntry]) -> Vec<TraceEvent> {
     let mut events = Vec::new();
-    let mut line: u32 = 1;
 
-    for entry in entries {
+    for (line, entry) in (1_u32..).zip(entries.iter()) {
         match entry {
             TraceEntry::ContractCall {
                 caller,
@@ -323,7 +322,6 @@ pub fn convert_snforge_trace(entries: &[TraceEntry]) -> Vec<TraceEvent> {
                 events.push(TraceEvent::Return);
             }
         }
-        line += 1;
     }
 
     events
@@ -389,8 +387,7 @@ pub fn write_starknet_trace(
     // The legacy convert_snforge_trace() path is preserved for unit-test
     // backward compatibility but is no longer the source of truth for
     // writing; it remains exposed for data-conversion fixtures.
-    let mut line: u32 = 1;
-    for entry in entries {
+    for (line, entry) in (1_u32..).zip(entries.iter()) {
         match entry {
             TraceEntry::ContractCall {
                 caller,
@@ -655,7 +652,6 @@ pub fn write_starknet_trace(
                 );
             }
         }
-        line += 1;
     }
 
     TraceWriter::finish_writing_trace_events(&mut *writer).map_err(|e| eyre!("{e}"))?;
