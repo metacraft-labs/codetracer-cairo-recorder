@@ -2403,9 +2403,7 @@ fn impl_block_ranges(lines: &[&str]) -> Vec<(usize, usize, String)> {
         };
         // Pull the impl name — everything up to the first whitespace /
         // generic / `of` keyword.
-        let stop = after_impl
-            .find([' ', '<', ':'])
-            .unwrap_or(after_impl.len());
+        let stop = after_impl.find([' ', '<', ':']).unwrap_or(after_impl.len());
         let impl_name = after_impl[..stop].trim().to_string();
         // Must contain ` of ` to be a trait impl (not a free impl block).
         if !trimmed.contains(" of ") {
