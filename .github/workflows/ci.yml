@@ -1,5 +1,9 @@
 name: CI
 
+# Re-plays the project's deterministic dev env on the runner.
+# See:
+#   https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-shared-dev-env.md
+
 on:
   push:
     branches: [main, dev, stable]
@@ -7,21 +11,13 @@ on:
     branches: [main, dev, stable]
 
 jobs:
-  lint:
-    name: Lint (fmt + clippy)
+  lint-and-test:
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
-      - name: Generate CI token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
       - uses: actions/checkout@v4
 
-      - name: Clone codetracer-trace-format (Cargo path dependency)
+      - name: Clone codetracer-trace-format sibling
         run: |
           PINS=".github/sibling-pins"
           TF_REF="main"
@@ -29,153 +25,48 @@ jobs:
             PIN="$(grep '^codetracer-trace-format ' "${PINS}" | cut -d' ' -f2)" || true
             [ -n "${PIN}" ] && TF_REF="${PIN}"
           fi
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          if [ -n "${TOKEN}" ]; then
-            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git"
-          else
-            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format.git"
-          fi
           rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format"
           if ! git clone --depth 1 --branch "${TF_REF}" --single-branch \
-            "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format" 2>/dev/null; then
+            "https://github.com/metacraft-labs/codetracer-trace-format.git" \
+            "${GITHUB_WORKSPACE}/../codetracer-trace-format" 2>/dev/null; then
             rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format"
-            git clone --no-checkout "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format"
+            git clone --no-checkout "https://github.com/metacraft-labs/codetracer-trace-format.git" \
+              "${GITHUB_WORKSPACE}/../codetracer-trace-format"
             git -C "${GITHUB_WORKSPACE}/../codetracer-trace-format" checkout "${TF_REF}"
           fi
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y capnproto libzstd-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: "2.2.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Nim trace writer library
+      - name: Clone codetracer-trace-format-nim sibling
         run: |
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          if [ -n "${TOKEN}" ]; then
-            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
-          else
-            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format-nim.git"
-          fi
-          git clone --depth 1 "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          nimble install -y stew results
-          nim c --app:staticlib --mm:arc --noMain -d:release --passC:'-fPIC' -p:src \
-            -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+          rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+          git clone --depth 1 \
+            "https://github.com/metacraft-labs/codetracer-trace-format-nim.git" \
+            "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+
+      - name: Setup dev env
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        with:
+          env-flavor: nix
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Nim trace writer library (sibling artifact)
+        # TODO: replace with `direnv exec ../codetracer-trace-format-nim
+        # just build-trace-writer-lib` once the sibling repo ships
+        # that target -- per cross-repo-builds.md.
+        run: |
+          dev-exec bash -c '
+            set -euo pipefail
+            cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+            nimble install -y stew results
+            nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
+              -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+          '
           echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Lint
+        run: dev-exec just lint
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Build and test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Generate CI token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
-      - uses: actions/checkout@v4
-
-      - name: Clone codetracer-trace-format (Cargo path dependency)
-        run: |
-          PINS=".github/sibling-pins"
-          TF_REF="main"
-          if [ -f "${PINS}" ]; then
-            PIN="$(grep '^codetracer-trace-format ' "${PINS}" | cut -d' ' -f2)" || true
-            [ -n "${PIN}" ] && TF_REF="${PIN}"
-          fi
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          if [ -n "${TOKEN}" ]; then
-            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git"
-          else
-            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format.git"
-          fi
-          rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format"
-          if ! git clone --depth 1 --branch "${TF_REF}" --single-branch \
-            "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format" 2>/dev/null; then
-            rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format"
-            git clone --no-checkout "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format"
-            git -C "${GITHUB_WORKSPACE}/../codetracer-trace-format" checkout "${TF_REF}"
-          fi
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libzstd-dev
-
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
-        with:
-          nim-version: "2.2.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build Nim trace writer library
-        run: |
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          if [ -n "${TOKEN}" ]; then
-            CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
-          else
-            CLONE_URL="https://github.com/metacraft-labs/codetracer-trace-format-nim.git"
-          fi
-          git clone --depth 1 "${CLONE_URL}" "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          nimble install -y stew results
-          nim c --app:staticlib --mm:arc --noMain -d:release --passC:'-fPIC' -p:src \
-            -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
-          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Fetch Cairo corelib
-        run: |
-          set -euo pipefail
-          # Extract the cairo-lang version from Cargo.toml so the corelib
-          # always matches the pinned compiler crates.
-          CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml \
-            | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "Cairo version: $CAIRO_VERSION"
-          curl -fsSL \
-            "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
-            -o cairo-src.tar.gz
-          tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
-          mv "cairo-${CAIRO_VERSION}/corelib" corelib
-          rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
-          echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "$GITHUB_ENV"
-
-      - name: Build all targets
-        run: nix develop --command cargo build --all-targets
-
-      - name: Run tests with zero-test guard
-        run: |
-          set -euo pipefail
-          OUTPUT=$(nix develop --command cargo test --all-targets 2>&1) || { echo "$OUTPUT"; exit 1; }
-          echo "$OUTPUT"
-          # Guard against silently empty test suites
-          if ! echo "$OUTPUT" | grep -qP "test result: ok\. [1-9]"; then
-            echo "::error::Zero tests passed — check that test binaries are compiling correctly"
-            exit 1
-          fi
+      - name: Test
+        run: dev-exec just test
 
       - name: Upload test logs on failure
         if: failure()
