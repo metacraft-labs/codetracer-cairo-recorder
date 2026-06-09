@@ -1,3 +1,9 @@
+// The Sequence/at-index docblock layout below intentionally mixes
+// prose with multi-line continuations; clippy::doc_lazy_continuation
+// flags the indentation but the wording is the same that appears in
+// the surrounding test-tracing literature.
+#![allow(clippy::doc_lazy_continuation)]
+
 //! Integration tests for the Cairo tracer.
 //!
 //! These tests cover three areas:
@@ -1721,7 +1727,7 @@ fn test_struct_test_via_ct_print_full() {
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        types.iter().any(|t| *t == "Point{x,y}"),
+        types.contains(&"Point{x,y}"),
         "expected `Point{{x,y}}` lang_type in types table; got {:?}",
         types
     );
