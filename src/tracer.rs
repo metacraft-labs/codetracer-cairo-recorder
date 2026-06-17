@@ -229,6 +229,42 @@ impl CairoTracer {
         TraceWriter::begin_writing_trace_events(&mut *tracer.writer, &events_path)
             .map_err(|e| eyre!("{e}"))?;
 
+        // FU-Column-Aware-Nav-Cairo: opt the canonical CTFS writer into
+        // column-aware step encoding *before* the first `register_step`
+        // / `start` call.  `enable_column_aware_steps` is sticky for the
+        // lifetime of the trace and gates the writer's `DeltaColumn`
+        // (tag 0x07) emission path plus the `meta.dat` bit 4 flag
+        // (`FLAG_HAS_COLUMN_AWARE_STEPS`).  Even when individual steps
+        // resolve to `column == None` (e.g. synthetic step lines)
+        // downstream readers rely on the flag to decide whether to
+        // surface a column field at all — mirrors the Solana / EVM /
+        // JS recorder contract.
+        TraceWriter::enable_column_aware_steps(&mut *tracer.writer);
+
+        // FU-Column-Aware-Nav-Cairo: register the source file's per-line
+        // byte-length table BEFORE `TraceWriter::start`.  `start`
+        // internally interns the path (without line-length data), and a
+        // later `register_path_with_line_lengths` for an already-interned
+        // path is silently dropped by the Nim writer — that drops the
+        // line-length table needed by the reader's
+        // `decodeGlobalPositionIndex`, so the per-step column field
+        // never surfaces in ct-print.  Registering up front populates
+        // `pathLineLengths` on the writer side and keeps the subsequent
+        // `start` a no-op (path id already interned).
+        let line_lengths = source_map.line_lengths();
+        if let Err(err) = TraceWriter::register_path_with_line_lengths(
+            &mut *tracer.writer,
+            source_path,
+            &line_lengths,
+        ) {
+            eprintln!(
+                "[codetracer-cairo-recorder] register_path_with_line_lengths failed for {}: {} \
+                 (column resolution will fall back to None for this file)",
+                source_path.display(),
+                err,
+            );
+        }
+
         // -- 7. Start the trace -------------------------------------------------------
         TraceWriter::start(&mut *tracer.writer, source_path, Line(1));
 
@@ -563,7 +599,25 @@ impl CairoTracer {
                 continue;
             }
 
-            TraceWriter::register_step(&mut *self.writer, source_path, Line(abs_line as i64));
+            // FU-Column-Aware-Nav-Cairo: split the line into top-level
+            // statements and emit one column-bearing step per statement
+            // so multi-statement-per-line fixtures
+            // (`let a = 1; let b = 2; let c = 3;`) surface as three
+            // strictly distinct columns in `ct-print --full` rather than
+            // collapsing onto a single step at column 1.  Single-statement
+            // lines (the overwhelming common case in Cairo fixtures)
+            // yield a single column at the line's first non-whitespace
+            // byte — semantically equivalent to the legacy
+            // `register_step` path so existing step-count pins hold.
+            let stmt_columns = statement_columns_on_line(line_text);
+            for col in &stmt_columns {
+                TraceWriter::register_step_with_column(
+                    &mut *self.writer,
+                    source_path,
+                    Line(abs_line as i64),
+                    Some(Line(*col as i64)),
+                );
+            }
 
             // Attach pending `@T` / `ref T` reference emissions to the
             // callee's entry step (the first body step the DFS emits
@@ -798,8 +852,17 @@ impl CairoTracer {
         let mut iters = 0u32;
         while let Some(cond) = eval_expr(&wl.condition, env) {
             // Header step (re-emitted each iteration so consumers can
-            // count loop iterations from the trace alone).
-            TraceWriter::register_step(&mut *self.writer, source_path, Line(wl.header_line as i64));
+            // count loop iterations from the trace alone).  Column is
+            // `None` here: the simulator doesn't carry the original
+            // header-line source text, and the while-keyword's column
+            // is irrelevant for column-aware navigation (single
+            // synthetic statement per iteration).
+            TraceWriter::register_step_with_column(
+                &mut *self.writer,
+                source_path,
+                Line(wl.header_line as i64),
+                None,
+            );
             if cond == 0 {
                 break;
             }
@@ -808,10 +871,17 @@ impl CairoTracer {
             // the parsed range (including unrecognised ones) so the
             // step_index sequence stays dense and aligned with the
             // source.  Lines we couldn't parse just don't contribute
-            // a variable update.
+            // a variable update.  Column-aware column is `None` — the
+            // simulator's parsed Statement form has discarded the
+            // original line text.
             for (offset, stmt) in wl.body_statements.iter().enumerate() {
                 let abs = wl.body_start_line + offset as u32;
-                TraceWriter::register_step(&mut *self.writer, source_path, Line(abs as i64));
+                TraceWriter::register_step_with_column(
+                    &mut *self.writer,
+                    source_path,
+                    Line(abs as i64),
+                    None,
+                );
                 if let Some(s) = stmt {
                     if let Some(new_val) = eval_expr(&s.rhs, env) {
                         env.insert(s.target.clone(), new_val);
@@ -3388,9 +3458,135 @@ fn extract_fn_name(line: &str) -> Option<String> {
     Some(after_fn[..paren_pos].trim().to_string())
 }
 
+/// Return the 1-based byte columns at which each statement on `line_text`
+/// begins.  Used by column-aware step emission so that a Cairo source
+/// line packing several statements
+/// (`let a = 1; let b = 2; let c = 3;`) surfaces one step per statement
+/// with strictly distinct columns rather than collapsing onto a single
+/// step at column 1.
+///
+/// Heuristic: split at every top-level `;` (i.e. one that lives outside
+/// parens/brackets/braces and outside string literals).  The column of a
+/// statement is the 1-based byte offset of its first non-whitespace
+/// character.  Lines whose only content is a single statement (or
+/// no recognised statement at all — e.g. a bare `}`) return a single
+/// column at the first non-whitespace byte.
+///
+/// Mirrors the JS recorder's per-statement column tracking and the
+/// EVM/Solana recorders' DWARF/source-map–driven column emission;
+/// the Cairo recorder doesn't yet have Sierra-level column info plumbed
+/// through, so this textual splitter is the fallback that still surfaces
+/// the spec-correct distinct-columns property the column-aware
+/// acceptance criteria pin down.
+fn statement_columns_on_line(line_text: &str) -> Vec<u32> {
+    let bytes = line_text.as_bytes();
+    let mut cols: Vec<u32> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_str = false;
+    let mut in_char = false;
+    let mut at_statement_start = true;
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // Detect the start of the *next* statement at the first
+        // non-whitespace byte after a top-level `;`.
+        if at_statement_start && !b.is_ascii_whitespace() {
+            cols.push((i + 1) as u32);
+            at_statement_start = false;
+        }
+
+        if in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => in_str = true,
+            b'\'' => in_char = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            b';' if depth == 0 => {
+                at_statement_start = true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // If nothing matched (e.g. an entirely whitespace line) fall back to
+    // column 1 so the caller still emits a single step.  Callers that
+    // already filtered empty/`}`/`{` lines won't hit this branch.
+    if cols.is_empty() {
+        cols.push(1);
+    }
+    cols
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_statement_columns_single_statement() {
+        // Plain single-statement body line indented by 4 spaces.
+        let cols = statement_columns_on_line("    let a = 1;");
+        assert_eq!(cols, vec![5]);
+    }
+
+    #[test]
+    fn test_statement_columns_three_statements_on_one_line() {
+        // The canonical multi-statement-per-line fixture: three Cairo
+        // statements on one line should surface three strictly distinct
+        // columns.  Indented by 4 spaces so the leftmost column is 5.
+        //
+        //   "    let a = 1; let b = 2; let c = 3;"
+        //    0    5    1    1    2    2    3
+        //         0    5    0    5    0
+        //        ^          ^          ^
+        //        col 5      col 16     col 27
+        let cols = statement_columns_on_line("    let a = 1; let b = 2; let c = 3;");
+        assert_eq!(cols, vec![5, 16, 27]);
+    }
+
+    #[test]
+    fn test_statement_columns_semicolon_inside_string() {
+        // A `;` inside a string literal must NOT split the statement.
+        let cols = statement_columns_on_line(r#"    let s = "a;b;c"; let y = 0;"#);
+        assert_eq!(cols.len(), 2, "got {:?}", cols);
+    }
+
+    #[test]
+    fn test_statement_columns_semicolon_inside_parens() {
+        // Top-level `;` only — `foo(a; b)` shouldn't split (Cairo doesn't
+        // accept that syntax, but the splitter must still be robust).
+        let cols = statement_columns_on_line("    let x = foo(1, 2); let y = 3;");
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0], 5);
+    }
 
     #[test]
     fn test_extract_fn_name() {
