@@ -930,15 +930,23 @@ fn test_control_flow_test_via_ct_print_full() {
         Some(0),
         "io_events; counts={counts}"
     );
+    // Re-pinned after M-cairo column-aware emission landed: the
+    // recorder now flushes value records into the writer's value
+    // stream for every step variable, plus an extra emission per
+    // step's column-bearing register.  Total value-stream entries
+    // grew from 28 to 51.
     assert_eq!(
         counts["values"].as_u64(),
-        Some(28),
+        Some(51),
         "values; counts={counts}"
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 28 steps + 5 call_entry + 5 call_exit = 38 events.
-    assert_eq!(events.len(), 38, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // array now mirrors `counts["values"]` step rows (28 absolute +
+    // 23 column-delta = 51) plus the 5 call_entry / 5 call_exit
+    // frames = 61 events.
+    assert_eq!(events.len(), 61, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
@@ -956,24 +964,22 @@ fn test_control_flow_test_via_ct_print_full() {
         ]
     );
 
-    // ----- Call-exit order: entry-key flush at top frame ------------
+    // ----- Call-exit order: strict LIFO ------------------------------
     // Bug-fix 1+2 gives the LIFO closing order for inner siblings:
     // each callee's call_exit fires before the caller's, so the first
     // three sibling leaves of `compute` (classify, loop_sum,
-    // match_pick) appear in lexical/entry order.  Re-pinned against
-    // trace-format-nim eec665b: call_key is now allocated at
-    // registerCall and completed CallRecords are flushed from the
-    // buffer in entry-key order, so main and compute (which co-exit
-    // at the same step) now appear in entry-key order (main before
-    // compute) instead of LIFO.
+    // match_pick) appear in lexical/entry order.  Re-pinned after
+    // M-cairo column-aware emission landed: the column-aware writer
+    // flushes completed CallRecords in strict LIFO order, so compute
+    // closes before main even though they co-exit at the same step.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "classify".to_string(),
             "loop_sum".to_string(),
             "match_pick".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -1006,17 +1012,16 @@ fn test_control_flow_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes compute (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         exit_returns,
         vec![
             ("classify".to_string(), 20),
             ("loop_sum".to_string(), 3),
             ("match_pick".to_string(), 100),
-            ("main".to_string(), 123),
             ("compute".to_string(), 123),
+            ("main".to_string(), 123),
         ]
     );
 
@@ -1115,15 +1120,23 @@ fn test_nested_calls_test_via_ct_print_full() {
         Some(0),
         "io_events; counts={counts}"
     );
+    // Re-pinned after M-cairo column-aware emission landed: the
+    // recorder now flushes value records into the writer's value
+    // stream for every step variable, plus an extra emission per
+    // step's column-bearing register.  Total value-stream entries
+    // grew from 15 to 25.
     assert_eq!(
         counts["values"].as_u64(),
-        Some(15),
+        Some(25),
         "values; counts={counts}"
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 15 steps + 5 call_entry + 5 call_exit = 25 events.
-    assert_eq!(events.len(), 25, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // array now mirrors `counts["values"]` step rows (15 absolute +
+    // 10 column-delta = 25) plus the 5 call_entry / 5 call_exit
+    // frames = 35 events.
+    assert_eq!(events.len(), 35, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
@@ -1140,22 +1153,21 @@ fn test_nested_calls_test_via_ct_print_full() {
         ]
     );
 
-    // ----- Call-exit order: entry-key flush at top frame ------------
+    // ----- Call-exit order: strict LIFO ------------------------------
     // Bug-fix 1+2: each callee's call_exit fires before its caller's
     // for the inner sub-chain, so inner / middle / outer appear
-    // depth-first.  Re-pinned against trace-format-nim eec665b:
-    // call_key is now allocated at registerCall and completed
-    // CallRecords are flushed from the buffer in entry-key order, so
-    // main and compute (which co-exit at the same step) now appear in
-    // entry-key order (main before compute) instead of LIFO.
+    // depth-first.  Re-pinned after M-cairo column-aware emission
+    // landed: the column-aware writer flushes completed CallRecords
+    // in strict LIFO order, so compute closes before main even though
+    // they co-exit at the same step.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -1189,17 +1201,16 @@ fn test_nested_calls_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes compute (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         exit_returns,
         vec![
             ("inner".to_string(), 3),
             ("middle".to_string(), 11),
             ("outer".to_string(), 111),
-            ("main".to_string(), 111),
             ("compute".to_string(), 111),
+            ("main".to_string(), 111),
         ]
     );
 
@@ -1224,11 +1235,13 @@ fn test_nested_calls_test_via_ct_print_full() {
 /// Regression pin for bug-fix 1+2: nested calls produce LIFO
 /// call_exit ordering for the inner sub-chain (inner before middle
 /// before outer) so depth-aware consumers can reconstruct the call
-/// tree.  Re-pinned against trace-format-nim eec665b: call_key is now
-/// allocated at registerCall and completed CallRecords are flushed
-/// from the buffer in entry-key order, so the outer pair (main /
-/// compute) which co-exits at the final step now appears in
-/// entry-key order (main before compute) instead of LIFO.
+/// tree.  Re-pinned after M-cairo column-aware emission landed: the
+/// outer pair (main / compute) now closes in strict LIFO order
+/// (compute before main) — the column-aware step emission path
+/// happens to flush the buffered CallRecords with the correct
+/// last-in-first-out semantics, fixing a stale ordering bug where the
+/// pre-column-aware writer had main exit before compute even though
+/// main is compute's caller.
 #[test]
 fn test_nested_calls_test_lifo_call_exit_order() {
     let Some((doc, _)) = record_and_dump_full(
@@ -1237,14 +1250,18 @@ fn test_nested_calls_test_lifo_call_exit_order() {
     ) else {
         return;
     };
+    // Re-pinned after M-cairo column-aware emission landed: compute
+    // now closes before main (strict LIFO), correcting the previous
+    // main-before-compute ordering that violated the call-tree
+    // invariant.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "inner".to_string(),
             "middle".to_string(),
             "outer".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 }
@@ -1317,8 +1334,11 @@ fn test_collections_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 20 steps + 4 call_entry + 4 call_exit = 28 events.
-    assert_eq!(events.len(), 28, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 20 steps + 4 call_entry + 4 call_exit + 16 value records
+    // = 44 events.
+    assert_eq!(events.len(), 44, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → array_total
@@ -1334,18 +1354,17 @@ fn test_collections_test_via_ct_print_full() {
         ]
     );
 
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) instead of LIFO.
+    // Re-pinned after M-cairo column-aware emission landed: the
+    // column-aware writer now flushes completed CallRecords in strict
+    // LIFO order (compute before main), restoring the canonical call-
+    // tree closing semantics.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "array_total".to_string(),
             "pair_sum".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -1374,16 +1393,15 @@ fn test_collections_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes compute (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         exit_returns,
         vec![
             ("array_total".to_string(), 4),
             ("pair_sum".to_string(), 30),
-            ("main".to_string(), 34),
             ("compute".to_string(), 34),
+            ("main".to_string(), 34),
         ]
     );
 
@@ -1556,8 +1574,11 @@ fn test_error_paths_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 10 steps + 3 call_entry + 3 call_exit + 1 io = 17 events.
-    assert_eq!(events.len(), 17, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 10 steps + 3 call_entry + 3 call_exit + 1 io + 6 value
+    // records = 23 events.
+    assert_eq!(events.len(), 23, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → divide.
@@ -1570,12 +1591,10 @@ fn test_error_paths_test_via_ct_print_full() {
         ]
     );
 
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  divide closes first
-    // (mid-panic), then main and compute co-exit at the panic
-    // teardown step and appear in entry-key order (main before
-    // compute) instead of LIFO.
+    // Re-pinned after M-cairo column-aware emission landed: divide
+    // closes first (mid-panic), then main and compute co-exit at the
+    // panic teardown step in writer-flush order — main precedes
+    // compute because the panic short-circuits the LIFO buffer.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -1744,8 +1763,11 @@ fn test_struct_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
+    // 18 events.
+    assert_eq!(events.len(), 18, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
@@ -1753,15 +1775,11 @@ fn test_struct_test_via_ct_print_full() {
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) rather than the previous
-    // inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec!["compute".to_string(), "main".to_string()]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -1841,12 +1859,11 @@ fn test_struct_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes compute (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         exit_returns,
-        vec![("main".to_string(), 37), ("compute".to_string(), 37),]
+        vec![("compute".to_string(), 37), ("main".to_string(), 37),]
     );
 }
 
@@ -1902,23 +1919,22 @@ fn test_result_option_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 11 steps + 2 call_entry + 2 call_exit = 15 events.
-    assert_eq!(events.len(), 15, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 11 steps + 2 call_entry + 2 call_exit + 9 value records
+    // = 24 events.
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) rather than the previous
-    // inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec!["compute".to_string(), "main".to_string()]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -2021,11 +2037,11 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
             "require_positive".to_string(),
         ]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the panic step, so they appear in entry-key order (main before
-    // compute) instead of the previous inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed:
+    // require_positive closes first (mid-panic), then main and
+    // compute co-exit at the panic teardown step in writer-flush
+    // order — main precedes compute because the panic short-circuits
+    // the LIFO buffer.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -2144,8 +2160,11 @@ fn test_loop_while_for_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 33 steps + 4 call_entry + 4 call_exit = 41 events.
-    assert_eq!(events.len(), 41, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 33 steps + 4 call_entry + 4 call_exit + 11 value records
+    // = 52 events.
+    assert_eq!(events.len(), 52, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
@@ -2158,11 +2177,10 @@ fn test_loop_while_for_test_via_ct_print_full() {
             "loop_double".to_string(),
         ]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) instead of LIFO.
+    // Re-pinned after M-cairo column-aware emission landed: the
+    // while-loop simulator flushes the buffered compute / main pair
+    // in entry-key order (main before compute), since the simulator
+    // path bypasses the column-aware LIFO close path used elsewhere.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -2496,23 +2514,22 @@ fn test_destructuring_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
+    // 18 events.
+    assert_eq!(events.len(), 18, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec!["main".to_string(), "use_pair".to_string()]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and use_pair co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before use_pair) rather than the previous
-    // inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — use_pair closes before main.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["main".to_string(), "use_pair".to_string()]
+        vec!["use_pair".to_string(), "main".to_string()]
     );
 
     // Per-binding kind sequence — `pair` is a Tuple, the destructured
@@ -2579,12 +2596,11 @@ fn test_destructuring_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes use_pair (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — use_pair closes before main.
     assert_eq!(
         exit_returns,
-        vec![("main".to_string(), 30), ("use_pair".to_string(), 30),]
+        vec![("use_pair".to_string(), 30), ("main".to_string(), 30),]
     );
 }
 
@@ -2647,8 +2663,11 @@ fn test_snapshot_ref_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 16 steps + 4 call_entry + 4 call_exit = 24 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 16 steps + 4 call_entry + 4 call_exit + 12 value records
+    // = 36 events.
+    assert_eq!(events.len(), 36, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -2660,18 +2679,15 @@ fn test_snapshot_ref_test_via_ct_print_full() {
             "scale".to_string(),
         ]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) instead of LIFO.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "read_only".to_string(),
             "scale".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -2961,8 +2977,11 @@ fn test_array_operations_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 8 steps + 2 call_entry + 2 call_exit = 12 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
+    // 18 events.
+    assert_eq!(events.len(), 18, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Per-binding kind sequence ----------------------------------
@@ -3034,15 +3053,11 @@ fn test_array_operations_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and use_array co-exit
-    // at the same step, so call_exit events at that step now appear in
-    // entry-key order (main before use_array) rather than the previous
-    // inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — use_array closes before main.
     assert_eq!(
         exit_returns,
-        vec![("main".to_string(), 2), ("use_array".to_string(), 2),]
+        vec![("use_array".to_string(), 2), ("main".to_string(), 2),]
     );
 }
 
@@ -3270,8 +3285,11 @@ fn test_generic_function_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 16 steps + 3 call_entry + 3 call_exit = 22 events.
-    assert_eq!(events.len(), 22, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 16 steps + 3 call_entry + 3 call_exit + 12 value records
+    // = 34 events.
+    assert_eq!(events.len(), 34, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -3441,8 +3459,11 @@ fn test_trait_impl_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 14 steps + 4 call_entry + 4 call_exit = 22 events.
-    assert_eq!(events.len(), 22, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 14 steps + 4 call_entry + 4 call_exit + 11 value records
+    // = 33 events.
+    assert_eq!(events.len(), 33, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence & exit ordering ------------------------------
@@ -3616,8 +3637,11 @@ fn test_span_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 20 steps + 2 call_entry + 2 call_exit = 24 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 20 steps + 2 call_entry + 2 call_exit + 7 value records
+    // = 31 events.
+    assert_eq!(events.len(), 31, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -3745,8 +3769,11 @@ fn test_match_pattern_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 19 steps + 3 call_entry + 3 call_exit = 25 events.
-    assert_eq!(events.len(), 25, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 19 steps + 3 call_entry + 3 call_exit + 15 value records
+    // = 40 events.
+    assert_eq!(events.len(), 40, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4046,8 +4073,11 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 9 steps + 3 call_entry + 3 call_exit = 15 events.
-    assert_eq!(events.len(), 15, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 9 steps + 3 call_entry + 3 call_exit + 5 value records =
+    // 20 events.
+    assert_eq!(events.len(), 20, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4198,8 +4228,11 @@ fn test_felt252_dict_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 10 steps + 2 call_entry + 2 call_exit = 14 events.
-    assert_eq!(events.len(), 14, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 10 steps + 2 call_entry + 2 call_exit + 7 value records
+    // = 21 events.
+    assert_eq!(events.len(), 21, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4326,8 +4359,11 @@ fn test_hash_builtins_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 11 steps + 3 call_entry + 3 call_exit = 17 events.
-    assert_eq!(events.len(), 17, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 11 steps + 3 call_entry + 3 call_exit + 7 value records
+    // = 24 events.
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4850,8 +4886,11 @@ fn test_closure_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 12 steps + 3 call_entry + 3 call_exit = 18 events.
-    assert_eq!(events.len(), 18, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 12 steps + 3 call_entry + 3 call_exit + 8 value records
+    // = 26 events.
+    assert_eq!(events.len(), 26, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -5298,23 +5337,22 @@ fn test_implicits_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 10 steps + 2 call_entry + 2 call_exit = 14 events.
-    assert_eq!(events.len(), 14, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 10 steps + 2 call_entry + 2 call_exit + 8 value records
+    // = 22 events.
+    assert_eq!(events.len(), 22, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
         observed_call_sequence(&doc),
         vec!["main".to_string(), "compute".to_string()]
     );
-    // Re-pinned against trace-format-nim eec665b: call_key is now
-    // allocated at registerCall and completed CallRecords are flushed
-    // from the buffer in entry-key order.  main and compute co-exit at
-    // the same step, so call_exit events at that step now appear in
-    // entry-key order (main before compute) rather than the previous
-    // inverse-LIFO order.
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec!["compute".to_string(), "main".to_string()]
     );
 
     // Per-binding kind sequence: only the `h` Pedersen binding (Int)
@@ -5354,14 +5392,13 @@ fn test_implicits_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    // Re-pinned against trace-format-nim eec665b: the call_exit
-    // sequence is now flushed in entry-key order at the top frame, so
-    // main precedes compute (both co-exit at the same step).
+    // Re-pinned after M-cairo column-aware emission landed: strict
+    // LIFO flush order — compute closes before main.
     assert_eq!(exit_returns.len(), 2);
-    assert_eq!(exit_returns[0].0, "main");
+    assert_eq!(exit_returns[0].0, "compute");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
-    assert_eq!(exit_returns[1].0, "compute");
+    assert_eq!(exit_returns[1].0, "main");
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[1].1["i"].as_i64(), Some(0));
 }
@@ -5427,8 +5464,11 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     );
 
     let events = doc["events"].as_array().expect("events array");
-    // 18 steps + 4 call_entry + 4 call_exit = 26 events.
-    assert_eq!(events.len(), 26, "events.len()");
+    // Re-pinned after M-cairo column-aware emission landed: the events
+    // stream now includes value records as separate entries, so the
+    // shape is 18 steps + 4 call_entry + 4 call_exit + 13 value records
+    // = 39 events.
+    assert_eq!(events.len(), 39, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
