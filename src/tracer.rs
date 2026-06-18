@@ -436,6 +436,18 @@ impl CairoTracer {
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         if let Some(root_name) = root {
+            // Seed the synthetic-return-value passenger with main's
+            // computed return value when one was statically derived
+            // (`compute_function_return_values`).  The
+            // `emit_function_dfs` recursion threads this value down
+            // the tail-call chain so the deepest reachable frame
+            // can surface a `return_value` step variable on its own
+            // last body line — see the parameter docstring on
+            // `emit_function_dfs`.  Functions that panicked (or
+            // whose return wasn't recovered) seed `None` and the
+            // pre-2026-06 behaviour (no synthetic variable, just a
+            // `Void` `register_return`) is preserved.
+            let seed_synthetic = fn_returns.get(&root_name).copied().flatten();
             self.emit_function_dfs(
                 source_path,
                 &root_name,
@@ -450,6 +462,7 @@ impl CairoTracer {
                 &span_emissions,
                 &var_values,
                 &mut visited,
+                seed_synthetic,
             );
         }
 
@@ -462,6 +475,16 @@ impl CairoTracer {
     /// down via the `counts.calls` field).  Steps within a body fire
     /// in source order; recursion into a callee fires the moment its
     /// invocation line is reached so call-entry events nest correctly.
+    ///
+    /// `pending_synthetic_return` rides along the *tail-call* path
+    /// (root → last-callee → its last-callee → …) so the deepest
+    /// frame on that path can surface the synthetic `return_value`
+    /// step variable on its own last body step, BEFORE its
+    /// `register_return` flushes the variable's pending-values
+    /// buffer.  Non-tail recursions receive `None` so the variable
+    /// is emitted exactly once per recording.  See the call site in
+    /// `emit_source_trace` for the seeding rule and the
+    /// pre-`register_return` block below for the consumption rule.
     #[allow(clippy::too_many_arguments)]
     fn emit_function_dfs(
         &mut self,
@@ -478,6 +501,7 @@ impl CairoTracer {
         span_emissions: &[SpanEmission],
         var_values: &std::collections::HashMap<String, i64>,
         visited: &mut std::collections::HashSet<String>,
+        pending_synthetic_return: Option<i64>,
     ) {
         if visited.contains(fn_name) {
             return;
@@ -521,6 +545,74 @@ impl CairoTracer {
             .iter()
             .filter(|r| r.callee == entry.bare_name)
             .collect();
+        // Position of the *last* callee on the *last* body line that
+        // would recurse INTO A NOT-YET-VISITED user function.  We can
+        // hand off the `pending_synthetic_return` passenger to that
+        // recursion (all earlier recursions get `None`).  We pre-scan
+        // once rather than re-detect inside the loop because a `None`
+        // here disables the synthetic-return propagation entirely —
+        // exactly the right behaviour for leaf frames (no callees)
+        // and for frames whose every recurse-able callee was already
+        // visited (so the recursion would short-circuit immediately
+        // and the synthetic would be silently dropped).
+        //
+        // We skip both `visited` callees (the DFS would short-circuit
+        // them) and the entry's own bare name (`parse_callees_in_line`
+        // matches the `fn <name>(` declaration line as a call to
+        // <name> itself; recursing into it would short-circuit on
+        // `visited` already, but excluding it explicitly keeps the
+        // pre-scan robust regardless of where in the body that line
+        // sits).
+        let tail_call_position: Option<(usize, usize)> = {
+            let mut found: Option<(usize, usize)> = None;
+            for (offset, callees) in entry.callees_per_line.iter().enumerate() {
+                let mut last_recursable: Option<usize> = None;
+                for (idx, callee) in callees.iter().enumerate() {
+                    if callee == &entry.bare_name {
+                        continue;
+                    }
+                    if visited.contains(callee) {
+                        continue;
+                    }
+                    last_recursable = Some(idx);
+                }
+                if let Some(idx) = last_recursable {
+                    found = Some((offset, idx));
+                }
+            }
+            found
+        };
+
+        // Whether this frame's body emits any step AFTER the last
+        // recursable call.  If true, the frame's `register_return`
+        // will flush a pending step that any synthetic
+        // `register_variable` we issue before it lands on — so we
+        // claim ownership of the synthetic-return emission here and
+        // refuse to hand it off to a descendant.  If false (the
+        // body's only post-recursion lines are blanks / braces, or
+        // the body is a pure tail-call delegation), no pending step
+        // exists at our `register_return`, so we propagate the
+        // passenger down the tail-call chain to a descendant whose
+        // body *does* emit a post-recursion step.
+        let has_post_recursion_step = match tail_call_position {
+            None => entry.callees_per_line.iter().enumerate().any(|(offset, _)| {
+                let abs = entry.start_line as usize + offset;
+                let t = lines.get(abs - 1).copied().unwrap_or("").trim();
+                !t.is_empty() && t != "{" && t != "}"
+            }),
+            Some((last_call_offset, _)) => {
+                let mut has_post = false;
+                for k in (last_call_offset + 1)..entry.line_count {
+                    let abs = entry.start_line as usize + k;
+                    let t = lines.get(abs - 1).copied().unwrap_or("").trim();
+                    if !t.is_empty() && t != "{" && t != "}" {
+                        has_post = true;
+                        break;
+                    }
+                }
+                has_post
+            }
+        };
         // `entry.body` is the full source — we still need indices into
         // it.  Use the absolute (1-based) line numbers stored on the
         // entry so step events match the canonical paths table.
@@ -698,8 +790,22 @@ impl CairoTracer {
 
             // Recurse into any callees mentioned on this line.  Skipped
             // automatically when the callee was already visited
-            // (`visited` set in `emit_function_dfs`).
-            for callee in &entry.callees_per_line[line_offset] {
+            // (`visited` set in `emit_function_dfs`).  Only the *last*
+            // callee on the *last* call-bearing body line inherits
+            // the `pending_synthetic_return` passenger — and only when
+            // *this* frame has no post-recursion body step to anchor
+            // the synthetic on itself.  When the frame DOES have a
+            // post-recursion body step, we keep the passenger so we
+            // can emit it at the end of our own body walk (the chrono-
+            // logically last step in the trace lives in this frame).
+            let callees_on_line = &entry.callees_per_line[line_offset];
+            for (idx, callee) in callees_on_line.iter().enumerate() {
+                let is_tail = Some((line_offset, idx)) == tail_call_position;
+                let recurse_synthetic = if is_tail && !has_post_recursion_step {
+                    pending_synthetic_return
+                } else {
+                    None
+                };
                 self.emit_function_dfs(
                     source_path,
                     callee,
@@ -714,6 +820,7 @@ impl CairoTracer {
                     span_emissions,
                     var_values,
                     visited,
+                    recurse_synthetic,
                 );
             }
             line_offset += 1;
@@ -732,14 +839,37 @@ impl CairoTracer {
             None => NONE_VALUE,
         };
 
-        // Surface the synthetic `return_value` step variable for the
-        // root frame, mirroring the legacy trailing-step the lexical
-        // walker emitted at the end of the source loop.  The variable
-        // attaches to the most recently emitted step (the root's last
-        // body line), which keeps `counts.values` aligned with the
-        // pinned per-program counts.
-        if entry.bare_name == "main" {
-            if let Some(v) = fn_returns.get(fn_name).copied().flatten() {
+        // Surface the synthetic `return_value` step variable when the
+        // tail-call passenger reached us *and* this frame had no
+        // tail-call to hand it off to (i.e. the body contains no
+        // recurse-able callees, OR every recurse-able callee was
+        // already `visited` and the DFS short-circuited).  The
+        // variable attaches to the most recently emitted step —
+        // which the `register_return` below flushes — so the
+        // synthetic lands on this frame's last body line in the
+        // trace, mirroring the legacy trailing-step the lexical
+        // walker emitted at the end of the source loop.
+        //
+        // History: pre-2026-06 the emission was unconditionally gated
+        // on `entry.bare_name == "main"` and fired *after* every
+        // callee returned.  On the Cairo recorder the Nim
+        // multi-stream writer flushes the deepest callee's pending
+        // step on its own `register_return`, leaving no buffered
+        // step for `main`'s post-recursion `register_variable` to
+        // attach to — the variable's bytes went into the
+        // pending-values accumulator and were dropped silently at
+        // `close()`.  The pre-2026-06 Linux build happened to land
+        // the variable on a pending step in fixtures whose `main`
+        // had a non-call body line after the last recursion
+        // (`byte_array_short_string`, …) but silently dropped it in
+        // fixtures where `main` was a pure delegation
+        // (`struct_test`, `collections_test`, …).  Threading the
+        // value down the tail-call path makes the emission point
+        // platform-independent and matches the chronological-last-
+        // step contract every observed-var-kind pin (16 fixtures)
+        // asserts on.
+        if has_post_recursion_step {
+            if let Some(v) = pending_synthetic_return {
                 let value = ValueRecord::Int {
                     i: v,
                     type_id: felt_type_id,
