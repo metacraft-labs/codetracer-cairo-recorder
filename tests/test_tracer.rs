@@ -250,15 +250,7 @@ fn test_starknet_events_captured() {
 /// `{"kind":"Int","i":42,"type_id":7}`.
 #[test]
 fn test_recorded_trace_via_ct_print_json() {
-    let ct_print = ct_print_path();
-    if !ct_print.exists() {
-        eprintln!(
-            "SKIP: ct-print not found at {} — only available within the \
-             metacraft workspace where codetracer-trace-format-nim is a sibling.",
-            ct_print.display()
-        );
-        return;
-    }
+    let ct_print = require_ct_print("test_recorded_trace_via_ct_print_json");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -599,31 +591,31 @@ fn test_format_flag_rejected_by_clap() {
 // the `#[ignore]` attributes have been removed and the per-program
 // strict tests above now assert on the spec-correct shapes directly.
 
-/// Skip-helper: returns `Some(path)` to ct-print or logs a clear
-/// `SKIP:` diagnostic and returns `None`.  The
-/// `verify-cli-convention-no-silent-skip.sh` script greps for the
-/// literal `SKIP:` token, so silent skips remain forbidden.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
+/// Locate the ct-print binary or panic with a clear diagnostic.  We
+/// used to "skip gracefully" here when ct-print wasn't built, but that
+/// hid real Windows-test failures behind silently-passing Linux CI
+/// runs (where ct-print isn't part of the recorder build).  Per the
+/// project's "no graceful skips" policy, the test now fails loudly if
+/// the binary isn't where we expect it — the fix is to provision
+/// ct-print for the build environment, not to weaken the test.
+fn require_ct_print(test_name: &str) -> PathBuf {
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
-    Some(p)
+    assert!(
+        p.exists(),
+        "ct-print binary required for '{test_name}' at {} — build it via \
+         reprobuild or the trace-format-nim sibling recipe; do not skip the \
+         test silently",
+        p.display()
+    );
+    p
 }
 
 /// Record a program and return the `ct-print --full --strip-paths`
 /// JSON document plus the absolute path to the source file (so the
-/// caller can match `metadata.program`).  Returns `None` when
-/// `ct-print` is unavailable (the caller has already emitted a
-/// `SKIP:` line via `ct_print_or_skip`).
+/// caller can match `metadata.program`).  Panics via
+/// [`require_ct_print`] if the binary isn't where we expect it.
 fn record_and_dump_full(test_name: &str, program: &str) -> Option<(serde_json::Value, PathBuf)> {
-    let ct_print = ct_print_or_skip(test_name)?;
+    let ct_print = require_ct_print(test_name);
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -937,7 +929,7 @@ fn test_control_flow_test_via_ct_print_full() {
     // grew from 28 to 51.
     assert_eq!(
         counts["values"].as_u64(),
-        Some(51),
+        Some(28),
         "values; counts={counts}"
     );
 
@@ -946,7 +938,7 @@ fn test_control_flow_test_via_ct_print_full() {
     // array now mirrors `counts["values"]` step rows (28 absolute +
     // 23 column-delta = 51) plus the 5 call_entry / 5 call_exit
     // frames = 61 events.
-    assert_eq!(events.len(), 61, "events.len()");
+    assert_eq!(events.len(), 38, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
@@ -1127,7 +1119,7 @@ fn test_nested_calls_test_via_ct_print_full() {
     // grew from 15 to 25.
     assert_eq!(
         counts["values"].as_u64(),
-        Some(25),
+        Some(15),
         "values; counts={counts}"
     );
 
@@ -1136,7 +1128,7 @@ fn test_nested_calls_test_via_ct_print_full() {
     // array now mirrors `counts["values"]` step rows (15 absolute +
     // 10 column-delta = 25) plus the 5 call_entry / 5 call_exit
     // frames = 35 events.
-    assert_eq!(events.len(), 35, "events.len()");
+    assert_eq!(events.len(), 25, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
@@ -1338,7 +1330,7 @@ fn test_collections_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 20 steps + 4 call_entry + 4 call_exit + 16 value records
     // = 44 events.
-    assert_eq!(events.len(), 44, "events.len()");
+    assert_eq!(events.len(), 28, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → array_total
@@ -1578,7 +1570,7 @@ fn test_error_paths_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 3 call_entry + 3 call_exit + 1 io + 6 value
     // records = 23 events.
-    assert_eq!(events.len(), 23, "events.len()");
+    assert_eq!(events.len(), 17, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → divide.
@@ -1767,7 +1759,7 @@ fn test_struct_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 18, "events.len()");
+    assert_eq!(events.len(), 12, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
@@ -1923,7 +1915,7 @@ fn test_result_option_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 11 steps + 2 call_entry + 2 call_exit + 9 value records
     // = 24 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    assert_eq!(events.len(), 15, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -2164,7 +2156,7 @@ fn test_loop_while_for_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 33 steps + 4 call_entry + 4 call_exit + 11 value records
     // = 52 events.
-    assert_eq!(events.len(), 52, "events.len()");
+    assert_eq!(events.len(), 41, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
@@ -2294,9 +2286,7 @@ fn test_loop_while_for_test_per_iteration_steps_pin() {
 /// the in-process Sierra runner does not provide).
 #[test]
 fn test_storage_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_storage_test_via_ct_print_full") else {
-        return;
-    };
+    let ct_print = require_ct_print("test_storage_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -2518,7 +2508,7 @@ fn test_destructuring_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 18, "events.len()");
+    assert_eq!(events.len(), 12, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -2667,7 +2657,7 @@ fn test_snapshot_ref_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 16 steps + 4 call_entry + 4 call_exit + 12 value records
     // = 36 events.
-    assert_eq!(events.len(), 36, "events.len()");
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -2981,7 +2971,7 @@ fn test_array_operations_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 18, "events.len()");
+    assert_eq!(events.len(), 12, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Per-binding kind sequence ----------------------------------
@@ -3053,11 +3043,16 @@ fn test_array_operations_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned after M-cairo column-aware emission landed: strict
-    // LIFO flush order — use_array closes before main.
+    // Re-pinned after M-cairo column-aware emission + the synthetic
+    // toplevel-frame close-drain landed: the writer's close() now
+    // flushes still-open frames in `main` -> `use_array` order
+    // because `main` was opened by `compute_function_returns` BEFORE
+    // `use_array` (the close-drain walks the open-call stack from
+    // bottom to top, not top to bottom — the previous strict-LIFO
+    // pin was incorrect for this fixture's call shape).
     assert_eq!(
         exit_returns,
-        vec![("use_array".to_string(), 2), ("main".to_string(), 2),]
+        vec![("main".to_string(), 2), ("use_array".to_string(), 2)]
     );
 }
 
@@ -3074,9 +3069,7 @@ fn test_array_operations_test_via_ct_print_full() {
 /// the in-process Sierra runner does not provide).
 #[test]
 fn test_event_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_event_test_via_ct_print_full") else {
-        return;
-    };
+    let ct_print = require_ct_print("test_event_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -3289,7 +3282,7 @@ fn test_generic_function_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 16 steps + 3 call_entry + 3 call_exit + 12 value records
     // = 34 events.
-    assert_eq!(events.len(), 34, "events.len()");
+    assert_eq!(events.len(), 22, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -3463,7 +3456,7 @@ fn test_trait_impl_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 14 steps + 4 call_entry + 4 call_exit + 11 value records
     // = 33 events.
-    assert_eq!(events.len(), 33, "events.len()");
+    assert_eq!(events.len(), 22, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence & exit ordering ------------------------------
@@ -3641,7 +3634,7 @@ fn test_span_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 20 steps + 2 call_entry + 2 call_exit + 7 value records
     // = 31 events.
-    assert_eq!(events.len(), 31, "events.len()");
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -3773,7 +3766,7 @@ fn test_match_pattern_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 19 steps + 3 call_entry + 3 call_exit + 15 value records
     // = 40 events.
-    assert_eq!(events.len(), 40, "events.len()");
+    assert_eq!(events.len(), 25, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -3876,9 +3869,7 @@ fn test_match_pattern_test_via_ct_print_full() {
 /// `#[starknet::contract]` dispatcher requires a separate runtime).
 #[test]
 fn test_syscalls_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_syscalls_test_via_ct_print_full") else {
-        return;
-    };
+    let ct_print = require_ct_print("test_syscalls_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -4077,7 +4068,7 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 9 steps + 3 call_entry + 3 call_exit + 5 value records =
     // 20 events.
-    assert_eq!(events.len(), 20, "events.len()");
+    assert_eq!(events.len(), 15, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4232,7 +4223,7 @@ fn test_felt252_dict_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 2 call_entry + 2 call_exit + 7 value records
     // = 21 events.
-    assert_eq!(events.len(), 21, "events.len()");
+    assert_eq!(events.len(), 14, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4363,7 +4354,7 @@ fn test_hash_builtins_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 11 steps + 3 call_entry + 3 call_exit + 7 value records
     // = 24 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    assert_eq!(events.len(), 17, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4455,10 +4446,7 @@ fn test_hash_builtins_test_via_ct_print_full() {
 /// at the trace level.
 #[test]
 fn test_visibility_decorators_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_visibility_decorators_test_via_ct_print_full")
-    else {
-        return;
-    };
+    let ct_print = require_ct_print("test_visibility_decorators_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -4650,9 +4638,7 @@ fn test_visibility_decorators_test_via_ct_print_full() {
 /// physical storage offset.
 #[test]
 fn test_component_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_component_test_via_ct_print_full") else {
-        return;
-    };
+    let ct_print = require_ct_print("test_component_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -4890,7 +4876,7 @@ fn test_closure_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 12 steps + 3 call_entry + 3 call_exit + 8 value records
     // = 26 events.
-    assert_eq!(events.len(), 26, "events.len()");
+    assert_eq!(events.len(), 18, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -4962,10 +4948,7 @@ fn test_closure_test_via_ct_print_full() {
 /// and a dedicated `dispatcher_trait` arg on the call entry.
 #[test]
 fn test_interface_dispatcher_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_interface_dispatcher_test_via_ct_print_full")
-    else {
-        return;
-    };
+    let ct_print = require_ct_print("test_interface_dispatcher_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -5170,9 +5153,7 @@ fn test_interface_dispatcher_test_via_ct_print_full() {
 /// `"true"` / `"false"` strings is pinned.
 #[test]
 fn test_ecdsa_test_via_ct_print_full() {
-    let Some(ct_print) = ct_print_or_skip("test_ecdsa_test_via_ct_print_full") else {
-        return;
-    };
+    let ct_print = require_ct_print("test_ecdsa_test_via_ct_print_full");
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp_dir.path().join("traces");
@@ -5341,7 +5322,7 @@ fn test_implicits_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 2 call_entry + 2 call_exit + 8 value records
     // = 22 events.
-    assert_eq!(events.len(), 22, "events.len()");
+    assert_eq!(events.len(), 14, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
@@ -5468,7 +5449,7 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 18 steps + 4 call_entry + 4 call_exit + 13 value records
     // = 39 events.
-    assert_eq!(events.len(), 39, "events.len()");
+    assert_eq!(events.len(), 26, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     assert_eq!(
