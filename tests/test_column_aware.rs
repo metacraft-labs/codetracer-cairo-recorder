@@ -41,29 +41,27 @@ fn ct_files_in(out_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Returns the path to ct-print or logs a `SKIP:` diagnostic and
-/// returns `None`.  Mirrors the convention enforced by
-/// `verify-cli-convention-no-silent-skip.sh`.
-fn ct_print_or_skip(test_name: &str) -> Option<PathBuf> {
+/// Returns the path to ct-print or panics with a clear diagnostic.
+/// Per the "no graceful skips" policy we used to silently bail when
+/// the binary wasn't built — that hid Windows-test failures behind
+/// Linux CI runs where ct-print isn't part of the recorder build.
+/// The fix is to provision ct-print, not to weaken the test.
+fn require_ct_print(test_name: &str) -> PathBuf {
     let p = ct_print_path();
-    if !p.exists() {
-        eprintln!(
-            "SKIP: {test_name} requires ct-print at {} — only available \
-             within the metacraft workspace where codetracer-trace-format-nim \
-             is a sibling.",
-            p.display()
-        );
-        return None;
-    }
-    Some(p)
+    assert!(
+        p.exists(),
+        "ct-print binary required for '{test_name}' at {} — build it via \
+         reprobuild or the trace-format-nim sibling recipe; do not skip the \
+         test silently",
+        p.display()
+    );
+    p
 }
 
 #[test]
 fn test_column_aware_distinct_columns_on_one_line() {
     let test_name = "test_column_aware_distinct_columns_on_one_line";
-    let Some(ct_print) = ct_print_or_skip(test_name) else {
-        return;
-    };
+    let ct_print = require_ct_print(test_name);
 
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test-programs")
