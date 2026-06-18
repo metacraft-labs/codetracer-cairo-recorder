@@ -362,6 +362,30 @@ pub fn write_starknet_trace(
     TraceWriter::begin_writing_trace_events(&mut *writer, &events_path)
         .map_err(|e| eyre!("{e}"))?;
 
+    // FU-Column-Aware-Nav-Cairo: enable column-aware mode
+    // unconditionally so `meta.dat` bit 4 (FLAG_HAS_COLUMN_AWARE_STEPS)
+    // is set even on traces that don't carry per-statement columns.
+    // The snforge JSON path emits synthetic line counters (one per
+    // entry), so the per-step column field is `None` — but downstream
+    // readers still rely on the flag to decide whether to surface a
+    // column field at all.  Mirrors the contract from
+    // `tests/test_column_aware_steps.rs::test_column_aware_flag_set_when_no_columns_provided`
+    // in the Solana recorder.
+    TraceWriter::enable_column_aware_steps(&mut *writer);
+
+    // Best-effort per-line byte table for the trace path.  The path is
+    // a JSON trace file (not a Cairo source), so the table only carries
+    // meaningful per-line counts when the caller happened to point at
+    // an on-disk file — synthetic / missing paths degrade to an empty
+    // table, which the writer treats as "no per-line data" and the
+    // reader falls back to surfacing `None` for columns on this path.
+    let line_lengths = crate::source_map::read_line_lengths_for_path(trace_path);
+    let _ = TraceWriter::register_path_with_line_lengths(
+        &mut *writer,
+        trace_path,
+        &line_lengths,
+    );
+
     TraceWriter::start(&mut *writer, trace_path, Line(1));
 
     let str_type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::String, "felt252");
@@ -398,7 +422,18 @@ pub fn write_starknet_trace(
                 self_kind,
                 dispatcher_trait,
             } => {
-                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                // FU-Column-Aware-Nav-Cairo: synthetic per-entry line
+                // counter — no source column to surface.  `None` keeps
+                // the wire-side column field absent on this step while
+                // the column-aware flag (set above) still latches the
+                // `meta.dat` bit so downstream readers know to look
+                // for columns on other traces from this recorder.
+                TraceWriter::register_step_with_column(
+                    &mut *writer,
+                    trace_path,
+                    Line(line as i64),
+                    None,
+                );
                 // M10 round-4 / round-5: choose the function table
                 // name based on which optional decorator field is
                 // present.  `dispatcher_trait` (round-5) wins over
@@ -474,7 +509,18 @@ pub fn write_starknet_trace(
                 key,
                 value,
             } => {
-                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                // FU-Column-Aware-Nav-Cairo: synthetic per-entry line
+                // counter — no source column to surface.  `None` keeps
+                // the wire-side column field absent on this step while
+                // the column-aware flag (set above) still latches the
+                // `meta.dat` bit so downstream readers know to look
+                // for columns on other traces from this recorder.
+                TraceWriter::register_step_with_column(
+                    &mut *writer,
+                    trace_path,
+                    Line(line as i64),
+                    None,
+                );
                 let name = format!("{}::storage_read", contract);
                 let fn_id =
                     TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
@@ -506,7 +552,18 @@ pub fn write_starknet_trace(
                 old_value,
                 new_value,
             } => {
-                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                // FU-Column-Aware-Nav-Cairo: synthetic per-entry line
+                // counter — no source column to surface.  `None` keeps
+                // the wire-side column field absent on this step while
+                // the column-aware flag (set above) still latches the
+                // `meta.dat` bit so downstream readers know to look
+                // for columns on other traces from this recorder.
+                TraceWriter::register_step_with_column(
+                    &mut *writer,
+                    trace_path,
+                    Line(line as i64),
+                    None,
+                );
                 let name = format!("{}::storage_write", contract);
                 let fn_id =
                     TraceWriter::ensure_function_id(&mut *writer, &name, trace_path, Line(1));
@@ -560,7 +617,18 @@ pub fn write_starknet_trace(
                 //
                 // Anything else falls back to a `ValueRecord::String`
                 // so the trace stays self-describing.
-                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                // FU-Column-Aware-Nav-Cairo: synthetic per-entry line
+                // counter — no source column to surface.  `None` keeps
+                // the wire-side column field absent on this step while
+                // the column-aware flag (set above) still latches the
+                // `meta.dat` bit so downstream readers know to look
+                // for columns on other traces from this recorder.
+                TraceWriter::register_step_with_column(
+                    &mut *writer,
+                    trace_path,
+                    Line(line as i64),
+                    None,
+                );
                 let qualified = if entry_contract.is_empty() {
                     name.clone()
                 } else {
@@ -637,7 +705,18 @@ pub fn write_starknet_trace(
                 // every consumer reads `text`, so this keeps the tag
                 // accessible without re-introducing the dropped
                 // metadata argument plumbing.
-                TraceWriter::register_step(&mut *writer, trace_path, Line(line as i64));
+                // FU-Column-Aware-Nav-Cairo: synthetic per-entry line
+                // counter — no source column to surface.  `None` keeps
+                // the wire-side column field absent on this step while
+                // the column-aware flag (set above) still latches the
+                // `meta.dat` bit so downstream readers know to look
+                // for columns on other traces from this recorder.
+                TraceWriter::register_step_with_column(
+                    &mut *writer,
+                    trace_path,
+                    Line(line as i64),
+                    None,
+                );
                 let metadata = format!("StarknetEvent:{contract}");
                 let content = format!(
                     "{metadata} keys=[{}] data=[{}]",
@@ -1080,6 +1159,19 @@ pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Pat
     TraceWriter::begin_writing_trace_events(&mut *writer, &events_path)
         .map_err(|e| eyre!("{e}"))?;
 
+    // FU-Column-Aware-Nav-Cairo: enable column-aware mode and register
+    // the synthetic path (no source on disk, so empty per-line table
+    // — the writer treats this as "no per-line data" and columns on
+    // this path surface as `None` at replay time).  Matters because
+    // the `meta.dat` bit needs to be set unconditionally for the
+    // replay-navigation flag to advertise itself to downstream tools.
+    TraceWriter::enable_column_aware_steps(&mut *writer);
+    let _ = TraceWriter::register_path_with_line_lengths(
+        &mut *writer,
+        &synthetic_path,
+        &[],
+    );
+
     TraceWriter::start(&mut *writer, &synthetic_path, Line(1));
 
     let str_type_id = TraceWriter::ensure_type_id(&mut *writer, TypeKind::String, "felt252");
@@ -1140,7 +1232,14 @@ fn write_invocation(
     let line = *line_counter;
     *line_counter += 1;
 
-    TraceWriter::register_step(writer, synthetic_path, Line(line as i64));
+    // FU-Column-Aware-Nav-Cairo: synthetic per-invocation line counter
+    // — no source column to surface for an on-chain replay.
+    TraceWriter::register_step_with_column(
+        writer,
+        synthetic_path,
+        Line(line as i64),
+        None,
+    );
 
     let name = format!(
         "{}::{}",
