@@ -89,6 +89,13 @@ The recorder is structured around the following modules in `src/`:
 | `starknet.rs` | Parsing and converting snforge / StarkNet trace data |
 | `lib.rs` | Public library API |
 
+### Examples
+
+See [`examples/`](examples/README.md) for a walkthrough that records
+and replays a few small Cairo and Starknet programs through the `ct`
+launcher (`ct record`, `ct replay`, `ct run`), including a
+column-aware step-over demo.
+
 ### Testing
 
 ```bash
