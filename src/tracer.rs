@@ -241,6 +241,14 @@ impl CairoTracer {
         // JS recorder contract.
         TraceWriter::enable_column_aware_steps(&mut *tracer.writer);
 
+        // M-capability-flags: Cairo's PC→source map is sharp enough
+        // for per-column breakpoints and per-column motions.
+        // Advertise both so the GUI exposes its M6 Alt+click
+        // affordance and sub-statement step buttons.  See spec
+        // `internal-files.md` §"Column-Aware Capability Flags".
+        TraceWriter::enable_column_breakpoints_support(&mut *tracer.writer);
+        TraceWriter::enable_column_motions_support(&mut *tracer.writer);
+
         // FU-Column-Aware-Nav-Cairo: register the source file's per-line
         // byte-length table BEFORE `TraceWriter::start`.  `start`
         // internally interns the path (without line-length data), and a
