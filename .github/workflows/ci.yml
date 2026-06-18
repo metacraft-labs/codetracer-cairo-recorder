@@ -36,9 +36,19 @@ jobs:
           fi
 
       - name: Clone codetracer-trace-format-nim sibling
+        # The branch we land on must carry the CTFS multi-stream writer
+        # `registerCall.entryStep` off-by-one fix (see
+        # `tests/test_tracer.rs` § Windows snforge tests).  On the
+        # `phase3-cairo-windows-fix` branch in *this* repo we pin
+        # to the matching `phase3-cairo-windows-fix` branch in the
+        # Nim sibling; on other branches we keep tracking `main`.
         run: |
           rm -rf "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          git clone --depth 1 \
+          BRANCH="main"
+          if [ "${GITHUB_REF_NAME}" = "phase3-cairo-windows-fix" ]; then
+            BRANCH="phase3-cairo-windows-fix"
+          fi
+          git clone --depth 1 --branch "${BRANCH}" \
             "https://github.com/metacraft-labs/codetracer-trace-format-nim.git" \
             "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
 
