@@ -133,12 +133,21 @@ jobs:
           CT_REF="${{ steps.resolve-refs.outputs.codetracer_ref }}"
           DEST="$GITHUB_WORKSPACE/../codetracer"
           rm -rf "$DEST"
-          # Clone without submodules, then init them individually.
-          # --recurse-submodules --shallow-submodules fails when pinned
-          # submodule SHAs are unreachable upstream.
+          # Clone without submodules first, then init them individually.
+          # --recurse-submodules fails when submodule SHAs are unreachable
+          # (force-pushed or rebased upstream). Individual init+update is
+          # more resilient: we can skip submodules that fail.
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer.git" \
             "$DEST"
+          if [ "$CT_REF" != "main" ]; then
+            git -C "$DEST" \
+              -c fetch.recurseSubmodules=false \
+              fetch --no-recurse-submodules origin "$CT_REF"
+            git -C "$DEST" \
+              -c submodule.recurse=false \
+              checkout --no-recurse-submodules FETCH_HEAD
+          fi
           cd "$DEST"
           git submodule init
           # Rewrite submodule URLs with auth token for private repos
@@ -163,11 +172,6 @@ jobs:
             fi
           done
           set -e
-          cd -
-          if [ "$CT_REF" != "main" ]; then
-            git -C "$DEST" fetch origin "$CT_REF"
-            git -C "$DEST" checkout "$CT_REF"
-          fi
 
       - name: Clone codetracer-vscode-extension
         env:
