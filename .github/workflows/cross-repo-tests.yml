@@ -271,7 +271,7 @@ jobs:
         # the recorder-level sibling checkout.
         run: |
           PINS="$GITHUB_WORKSPACE/.github/sibling-pins"
-          TFN_REF="$(awk '$1 == "codetracer-trace-format-nim" { print $2; found = 1 } END { exit found ? 0 : 1 }' "$PINS")"
+          TFN_REF="$(grep '^codetracer-trace-format-nim ' "$PINS" | cut -d' ' -f2)"
           DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format-nim"
           rm -rf "$DEST"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
