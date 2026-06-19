@@ -386,11 +386,7 @@ pub fn write_starknet_trace(
     // table, which the writer treats as "no per-line data" and the
     // reader falls back to surfacing `None` for columns on this path.
     let line_lengths = crate::source_map::read_line_lengths_for_path(trace_path);
-    let _ = TraceWriter::register_path_with_line_lengths(
-        &mut *writer,
-        trace_path,
-        &line_lengths,
-    );
+    let _ = TraceWriter::register_path_with_line_lengths(&mut *writer, trace_path, &line_lengths);
 
     TraceWriter::start(&mut *writer, trace_path, Line(1));
 
@@ -1175,11 +1171,7 @@ pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Pat
     // M-capability-flags: see sibling call site above.
     writer.enable_column_breakpoints_support();
     writer.enable_column_motions_support();
-    let _ = TraceWriter::register_path_with_line_lengths(
-        &mut *writer,
-        &synthetic_path,
-        &[],
-    );
+    let _ = TraceWriter::register_path_with_line_lengths(&mut *writer, &synthetic_path, &[]);
 
     TraceWriter::start(&mut *writer, &synthetic_path, Line(1));
 
@@ -1243,12 +1235,7 @@ fn write_invocation(
 
     // FU-Column-Aware-Nav-Cairo: synthetic per-invocation line counter
     // — no source column to surface for an on-chain replay.
-    TraceWriter::register_step_with_column(
-        writer,
-        synthetic_path,
-        Line(line as i64),
-        None,
-    );
+    TraceWriter::register_step_with_column(writer, synthetic_path, Line(line as i64), None);
 
     let name = format!(
         "{}::{}",
