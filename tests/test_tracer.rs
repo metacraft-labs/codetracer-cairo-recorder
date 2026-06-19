@@ -356,15 +356,17 @@ fn test_recorded_trace_via_ct_print_json() {
     );
 
     // ----- Step / call counts ----------------------------------------
-    // The recorder emits the initial program step, main's declaration
-    // and tail-call line, and compute's declaration/body steps, for a
-    // total of 10 step events.  Two call_entry events: main, then
-    // compute.  These are stable properties of the canonical fixture.
+    // The recorder emits the initial program step, main's declaration,
+    // a DAP-visible call site before entering compute, compute's
+    // declaration/body steps, and a final main continuation step, for a
+    // total of 11 logical step events.
+    // Two call_entry events: main, then compute.  These are stable
+    // properties of the canonical fixture.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
-        Some(10),
-        "expected 10 step events for flow_test.cairo; counts={counts}",
+        Some(11),
+        "expected 11 step events for flow_test.cairo; counts={counts}",
     );
     assert_eq!(
         counts["calls"].as_u64(),
@@ -402,11 +404,11 @@ fn test_recorded_trace_via_ct_print_json() {
     );
 
     // ----- DAP-style call range / ownership invariants ----------------
-    // The direct tail call in `main` (`compute()`) must open a compute
-    // child frame whose own source steps are navigable.  A regression
-    // here can still leave variables somewhere in the raw event stream,
-    // while DAP stepping lands on the compute return line with empty
-    // locals because the compute call has no body step range.
+    // The explicit `let result = compute();` call site in `main` must
+    // open a compute child frame whose own source steps are navigable.
+    // A regression here can still leave variables somewhere in the raw
+    // event stream, while DAP stepping lands on the caller line with
+    // empty locals because the compute call has no body step range.
     let main_entry_pos = events
         .iter()
         .position(|e| {
@@ -486,23 +488,55 @@ fn test_recorded_trace_via_ct_print_json() {
         "compute must have a non-empty step range; compute_entry={compute_entry}"
     );
 
-    let tail_call_steps: Vec<&serde_json::Value> = events
+    let first_call_site_step_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "step"
+                && e["line"].as_u64() == Some(11)
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::main"))
+        })
+        .expect("main call-site line 11 step before compute");
+    assert!(
+        first_call_site_step_pos < compute_entry_pos,
+        "DAP step-in needs a caller line-11 call-site step before compute opens; \
+         events={events:?}"
+    );
+
+    let call_site_steps: Vec<&serde_json::Value> = events
         .iter()
         .filter(|e| e["kind"] == "step" && e["line"].as_u64() == Some(11))
         .collect();
     assert!(
-        tail_call_steps.iter().any(|e| e["function"]
+        call_site_steps.iter().any(|e| e["function"]
             .as_str()
             .is_some_and(|f| f.ends_with("::main"))),
-        "main tail-call line 11 must remain attributed to main; steps={tail_call_steps:?}"
+        "main call-site line 11 must remain attributed to main; steps={call_site_steps:?}"
     );
     assert!(
-        !tail_call_steps.iter().any(|e| e["function"]
+        !call_site_steps.iter().any(|e| e["function"]
             .as_str()
             .is_some_and(|f| f.ends_with("::compute"))),
-        "main tail-call line 11 must not be swallowed by compute; steps={tail_call_steps:?}"
+        "main call-site line 11 must not be swallowed by compute; steps={call_site_steps:?}"
     );
 
+    let continuation_step_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "step"
+                && e["line"].as_u64() == Some(12)
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::main"))
+        })
+        .expect("main continuation line 12 step after compute");
+    assert!(
+        compute_exit_pos < continuation_step_pos,
+        "main must regain ownership on line 12 after compute exits; events={events:?}"
+    );
+
+    let mut compute_body_lines = std::collections::BTreeSet::new();
     let mut compute_scoped_vars: Vec<(String, i64)> = Vec::new();
     for ev in &events[compute_entry_pos + 1..compute_exit_pos] {
         if ev["kind"] != "step"
@@ -522,6 +556,7 @@ fn test_recorded_trace_via_ct_print_json() {
             (1..=7).contains(&line),
             "compute local must stay on a compute source line; ev={ev}"
         );
+        compute_body_lines.insert(line);
         for v in ev["vars"].as_array().cloned().unwrap_or_default() {
             let name = v["varname"].as_str().expect("varname str").to_string();
             let value = &v["value"];
@@ -534,6 +569,11 @@ fn test_recorded_trace_via_ct_print_json() {
             compute_scoped_vars.push((name, i));
         }
     }
+    assert!(
+        (2..=7).all(|line| compute_body_lines.contains(&line)),
+        "DAP-visible compute range must include real compute body lines; \
+         got {compute_body_lines:?}"
+    );
     assert_eq!(
         compute_scoped_vars,
         vec![
@@ -585,9 +625,7 @@ fn test_recorded_trace_via_ct_print_json() {
         .collect();
 
     // The canonical flow: a=10, b=32, sum_val=a+b=42, doubled=sum_val*2=84,
-    // final_result=doubled+a=94.  The `return_value` synthetic binding for
-    // the tuple result of main() also evaluates to 94 (Cairo flattens the
-    // 5-tuple to its terminal felt in the trace's return slot).
+    // final_result=doubled+a=94.
     let expected: &[(&str, i64)] = &[
         ("a", 10),
         ("b", 32),
