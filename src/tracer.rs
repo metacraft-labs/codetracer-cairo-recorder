@@ -246,8 +246,8 @@ impl CairoTracer {
         // Advertise both so the GUI exposes its M6 Alt+click
         // affordance and sub-statement step buttons.  See spec
         // `internal-files.md` §"Column-Aware Capability Flags".
-        TraceWriter::enable_column_breakpoints_support(&mut *tracer.writer);
-        TraceWriter::enable_column_motions_support(&mut *tracer.writer);
+        tracer.writer.enable_column_breakpoints_support();
+        tracer.writer.enable_column_motions_support();
 
         // FU-Column-Aware-Nav-Cairo: register the source file's per-line
         // byte-length table BEFORE `TraceWriter::start`.  `start`
