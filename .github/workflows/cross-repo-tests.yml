@@ -264,7 +264,24 @@ jobs:
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
-          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format"
+          # Override BOTH trace-format AND trace-format-nim against the
+          # workflow-cloned siblings so the Rust wrapper and the Nim FFI
+          # advance together.  Without the -nim override, codetracer's
+          # flake.lock pins a stale trace-format-nim (864cb81, Jun 12)
+          # that predates the meta.dat capability flag bits 6+7
+          # introduced in f290ff0.  The cairo recorder calls
+          # ``enable_column_breakpoints_support`` /
+          # ``enable_column_motions_support`` which set those bits, but
+          # the stale db-backend reader's strict ``KnownFlags`` mask
+          # then rejects the trace at meta-parse time with
+          # ``meta.dat: unknown flag bits set: 0x00C0``.  The dispatcher
+          # falls through to the rr replay-worker path with an empty
+          # recreator_exe and ``Command::new("").spawn()`` errors with
+          # ``No such file or directory (os error 2)`` -- the symptom
+          # the WDIO smoke ``ct/event-load`` request surfaces (cross-
+          # repo run 27798227206).  Mirror Solana's fix (a43e8f6).
+          OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format \
+                    --override-input codetracer-trace-format-nim path:$GITHUB_WORKSPACE/../codetracer-trace-format-nim"
           # ``metacraft-labs-codetracer.cachix.org`` serves a stale
           # narinfo for the noir flake input keyed under a NAR-hash
           # that no longer matches the lockfile, so the build aborts
