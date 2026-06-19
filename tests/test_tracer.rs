@@ -356,12 +356,10 @@ fn test_recorded_trace_via_ct_print_json() {
     );
 
     // ----- Step / call counts ----------------------------------------
-    // The Cairo Sierra runner emits one step per executed source line
-    // for both `compute` (lines 1..6) and `main` (lines 7, 10, 11),
-    // for a total of 10 step events.  Two call_entry events: compute,
-    // then main.  These are stable properties of the canonical fixture
-    // — if they change, that's a real regression to investigate, not
-    // a flake.
+    // The recorder emits the initial program step, main's declaration
+    // and tail-call line, and compute's declaration/body steps, for a
+    // total of 10 step events.  Two call_entry events: main, then
+    // compute.  These are stable properties of the canonical fixture.
     let counts = &doc["counts"];
     assert_eq!(
         counts["steps"].as_u64(),
@@ -401,6 +399,151 @@ fn test_recorded_trace_via_ct_print_json() {
         call_sequence[1].ends_with("::compute"),
         "expected second call to be `compute` (called from main); got {:?}",
         call_sequence
+    );
+
+    // ----- DAP-style call range / ownership invariants ----------------
+    // The direct tail call in `main` (`compute()`) must open a compute
+    // child frame whose own source steps are navigable.  A regression
+    // here can still leave variables somewhere in the raw event stream,
+    // while DAP stepping lands on the compute return line with empty
+    // locals because the compute call has no body step range.
+    let main_entry_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "call_entry"
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::main"))
+        })
+        .expect("main call_entry");
+    let compute_entry_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "call_entry"
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::compute"))
+        })
+        .expect("compute call_entry");
+    let compute_exit_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "call_exit"
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::compute"))
+        })
+        .expect("compute call_exit");
+    let main_exit_pos = events
+        .iter()
+        .position(|e| {
+            e["kind"] == "call_exit"
+                && e["function"]
+                    .as_str()
+                    .is_some_and(|f| f.ends_with("::main"))
+        })
+        .expect("main call_exit");
+
+    assert!(
+        main_entry_pos < compute_entry_pos && compute_entry_pos < compute_exit_pos,
+        "compute call must contain events after its entry; events={events:?}"
+    );
+    assert!(
+        compute_exit_pos < main_exit_pos,
+        "compute must exit before main so the call tree is LIFO; events={events:?}"
+    );
+
+    let main_entry = &events[main_entry_pos];
+    let compute_entry = &events[compute_entry_pos];
+    let main_key = main_entry["call_key"].as_i64().expect("main call_key");
+    let compute_key = compute_entry["call_key"]
+        .as_i64()
+        .expect("compute call_key");
+    assert_eq!(
+        compute_entry["parent_call_key"].as_i64(),
+        Some(main_key),
+        "compute must be a child of main; compute_entry={compute_entry}"
+    );
+    let main_children: Vec<i64> = main_entry["children"]
+        .as_array()
+        .expect("main children")
+        .iter()
+        .map(|v| v.as_i64().expect("child call key"))
+        .collect();
+    assert!(
+        main_children.contains(&compute_key),
+        "main call must list compute as a child; main_entry={main_entry}"
+    );
+
+    let compute_entry_step = compute_entry["entry_step"]
+        .as_u64()
+        .expect("compute entry_step");
+    let compute_exit_step = compute_entry["exit_step"]
+        .as_u64()
+        .expect("compute exit_step");
+    assert!(
+        compute_exit_step > compute_entry_step,
+        "compute must have a non-empty step range; compute_entry={compute_entry}"
+    );
+
+    let tail_call_steps: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["kind"] == "step" && e["line"].as_u64() == Some(11))
+        .collect();
+    assert!(
+        tail_call_steps.iter().any(|e| e["function"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("::main"))),
+        "main tail-call line 11 must remain attributed to main; steps={tail_call_steps:?}"
+    );
+    assert!(
+        !tail_call_steps.iter().any(|e| e["function"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("::compute"))),
+        "main tail-call line 11 must not be swallowed by compute; steps={tail_call_steps:?}"
+    );
+
+    let mut compute_scoped_vars: Vec<(String, i64)> = Vec::new();
+    for ev in &events[compute_entry_pos + 1..compute_exit_pos] {
+        if ev["kind"] != "step"
+            || !ev["function"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("::compute"))
+        {
+            continue;
+        }
+        assert_eq!(
+            ev["depth"].as_u64(),
+            Some(1),
+            "compute step must be at depth 1; ev={ev}"
+        );
+        let line = ev["line"].as_u64().expect("compute step line");
+        assert!(
+            (1..=7).contains(&line),
+            "compute local must stay on a compute source line; ev={ev}"
+        );
+        for v in ev["vars"].as_array().cloned().unwrap_or_default() {
+            let name = v["varname"].as_str().expect("varname str").to_string();
+            let value = &v["value"];
+            assert_eq!(
+                value["kind"].as_str(),
+                Some("Int"),
+                "compute var `{name}` should decode as Int, got {value}"
+            );
+            let i = value["i"].as_i64().expect("Int.i");
+            compute_scoped_vars.push((name, i));
+        }
+    }
+    assert_eq!(
+        compute_scoped_vars,
+        vec![
+            ("a".to_string(), 10),
+            ("b".to_string(), 32),
+            ("sum_val".to_string(), 42),
+            ("doubled".to_string(), 84),
+            ("final_result".to_string(), 94),
+        ],
+        "compute locals must be emitted under the compute call before call_exit"
     );
 
     // ----- Exact decoded variable values ------------------------------
