@@ -262,6 +262,21 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git" "$DEST"
           git -C "$DEST" checkout "$TF_REF"
 
+      - name: Clone codetracer-trace-format-nim into codetracer/libs (CI override)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        # The overridden trace-format build.rs resolves the Nim FFI
+        # repo as a sibling of its source root.  With the override above,
+        # that means codetracer/libs/codetracer-trace-format-nim, not only
+        # the recorder-level sibling checkout.
+        run: |
+          PINS="$GITHUB_WORKSPACE/.github/sibling-pins"
+          TFN_REF="$(awk '$1 == "codetracer-trace-format-nim" { print $2; found = 1 } END { exit found ? 0 : 1 }' "$PINS")"
+          DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format-nim"
+          rm -rf "$DEST"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
+          git -C "$DEST" checkout --detach "$TFN_REF"
+
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
