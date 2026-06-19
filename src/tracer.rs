@@ -639,11 +639,15 @@ impl CairoTracer {
         // passenger down the tail-call chain to a descendant whose
         // body *does* emit a post-recursion step.
         let has_post_recursion_step = match tail_call_position {
-            None => entry.callees_per_line.iter().enumerate().any(|(offset, _)| {
-                let abs = entry.start_line as usize + offset;
-                let t = lines.get(abs - 1).copied().unwrap_or("").trim();
-                !t.is_empty() && t != "{" && t != "}"
-            }),
+            None => entry
+                .callees_per_line
+                .iter()
+                .enumerate()
+                .any(|(offset, _)| {
+                    let abs = entry.start_line as usize + offset;
+                    let t = lines.get(abs - 1).copied().unwrap_or("").trim();
+                    !t.is_empty() && t != "{" && t != "}"
+                }),
             Some((last_call_offset, _)) => {
                 let mut has_post = false;
                 for k in (last_call_offset + 1)..entry.line_count {
