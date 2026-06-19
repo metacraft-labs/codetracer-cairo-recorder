@@ -1583,16 +1583,18 @@ fn test_error_paths_test_via_ct_print_full() {
         ]
     );
 
-    // Re-pinned after M-cairo column-aware emission landed: divide
-    // closes first (mid-panic), then main and compute co-exit at the
-    // panic teardown step in writer-flush order — main precedes
-    // compute because the panic short-circuits the LIFO buffer.
+    // Strict LIFO flush order — divide closes first (mid-panic),
+    // then compute (the innermost still-open frame), then main.
+    // ct-print's call_exit emitter sorts shared-step exits by
+    // (exit_step ASC, call_key DESC) so callee-before-caller is
+    // preserved even when the panic-teardown close() drain places
+    // both at the same step index.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "divide".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -2029,17 +2031,18 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
             "require_positive".to_string(),
         ]
     );
-    // Re-pinned after M-cairo column-aware emission landed:
-    // require_positive closes first (mid-panic), then main and
-    // compute co-exit at the panic teardown step in writer-flush
-    // order — main precedes compute because the panic short-circuits
-    // the LIFO buffer.
+    // Strict LIFO flush order — require_positive closes first
+    // (mid-panic), then compute (the innermost still-open frame),
+    // then main.  ct-print's call_exit emitter sorts shared-step
+    // exits by (exit_step ASC, call_key DESC) so callee-before-caller
+    // is preserved even when the panic-teardown close() drain places
+    // both at the same step index.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "require_positive".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -2169,17 +2172,18 @@ fn test_loop_while_for_test_via_ct_print_full() {
             "loop_double".to_string(),
         ]
     );
-    // Re-pinned after M-cairo column-aware emission landed: the
-    // while-loop simulator flushes the buffered compute / main pair
-    // in entry-key order (main before compute), since the simulator
-    // path bypasses the column-aware LIFO close path used elsewhere.
+    // Strict LIFO flush order — `compute` (the innermost frame at
+    // close-time) closes before `main`.  ct-print's call_exit
+    // emitter sorts shared-step exits by (exit_step ASC, call_key
+    // DESC) so callee-before-caller is preserved even when the
+    // close() drain places both at the same step index.
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "loop_three".to_string(),
             "loop_double".to_string(),
-            "main".to_string(),
             "compute".to_string(),
+            "main".to_string(),
         ]
     );
 
@@ -3043,16 +3047,14 @@ fn test_array_operations_test_via_ct_print_full() {
             (name, i)
         })
         .collect();
-    // Re-pinned after M-cairo column-aware emission + the synthetic
-    // toplevel-frame close-drain landed: the writer's close() now
-    // flushes still-open frames in `main` -> `use_array` order
-    // because `main` was opened by `compute_function_returns` BEFORE
-    // `use_array` (the close-drain walks the open-call stack from
-    // bottom to top, not top to bottom — the previous strict-LIFO
-    // pin was incorrect for this fixture's call shape).
+    // Strict LIFO flush order — `use_array` closes before `main`.
+    // ct-print's call_exit emitter now sorts shared-step exits by
+    // (exit_step ASC, call_key DESC) so callee-before-caller is
+    // preserved even when the close() drain places both at the same
+    // step index (see ct_print.nim: "call_exit ordering" comment).
     assert_eq!(
         exit_returns,
-        vec![("main".to_string(), 2), ("use_array".to_string(), 2)]
+        vec![("use_array".to_string(), 2), ("main".to_string(), 2)]
     );
 }
 
