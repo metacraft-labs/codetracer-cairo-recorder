@@ -277,10 +277,77 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
           git -C "$DEST" checkout --detach "$TFN_REF"
 
+      - name: Patch codetracer Nix trace-format-nim sibling
+        # The CodeTracer db-backend Nix derivation copies the overridden
+        # codetracer-trace-format source into the build sandbox at
+        # $sourceRoot/../codetracer-trace-format. codetracer_trace_writer_nim's
+        # build.rs then resolves codetracer-trace-format-nim as the sibling
+        # $sourceRoot/../codetracer-trace-format-nim, so the workspace clone
+        # under codetracer/libs is not enough by itself.
+        run: |
+          FLAKE_NIX="$GITHUB_WORKSPACE/../codetracer/flake.nix"
+          DEFAULT_NIX="$GITHUB_WORKSPACE/../codetracer/nix/packages/default.nix"
+          INPUT_MARKER="codetracer-trace-format-nim-ci-input"
+          MARKER="codetracer-trace-format-nim-ci-sibling"
+          NEEDLE="cp -r \${inputs.codetracer-trace-format} \$sourceRoot/../codetracer-trace-format"
+
+          if ! grep -F "$INPUT_MARKER" "$FLAKE_NIX" >/dev/null; then
+            tmp="$(mktemp)"
+            inside_trace_format=0
+            inserted=0
+            while IFS= read -r line; do
+              printf '%s\n' "$line" >> "$tmp"
+              if [ "$line" = "    codetracer-trace-format = {" ]; then
+                inside_trace_format=1
+              elif [ "$inside_trace_format" = 1 ] && [ "$line" = "    };" ]; then
+                cat >> "$tmp" <<'PATCH'
+
+              # codetracer-trace-format-nim-ci-input: CI-only input patched by
+              # recorder workflows so db-backend's Nix build can materialize the
+              # Nim FFI sibling at the path codetracer_trace_writer_nim/build.rs derives.
+              codetracer-trace-format-nim = {
+                url = "path:./libs/codetracer-trace-format-nim";
+                flake = false;
+              };
+          PATCH
+                inside_trace_format=0
+                inserted=1
+              fi
+            done < "$FLAKE_NIX"
+            mv "$tmp" "$FLAKE_NIX"
+            if [ "$inserted" != 1 ]; then
+              echo "::error::failed to patch $FLAKE_NIX with trace-format-nim input"
+              exit 1
+            fi
+          fi
+
+          if ! grep -F "$MARKER" "$DEFAULT_NIX" >/dev/null; then
+            tmp="$(mktemp)"
+            while IFS= read -r line; do
+              printf '%s\n' "$line" >> "$tmp"
+              if [ "$line" = "              $NEEDLE" ]; then
+                cat >> "$tmp" <<'PATCH'
+                        # codetracer-trace-format-nim-ci-sibling: materialize the
+                        # pinned Nim FFI checkout next to the copied trace-format source
+                        # at the path codetracer_trace_writer_nim/build.rs derives.
+                        cp -r ${inputs.codetracer-trace-format-nim} $sourceRoot/../codetracer-trace-format-nim
+                        chmod -R u+w $sourceRoot/../codetracer-trace-format-nim
+          PATCH
+              fi
+            done < "$DEFAULT_NIX"
+            mv "$tmp" "$DEFAULT_NIX"
+          fi
+
+          if ! grep -F "$MARKER" "$DEFAULT_NIX" >/dev/null; then
+            echo "::error::failed to patch $DEFAULT_NIX with trace-format-nim sibling materialization"
+            exit 1
+          fi
+
       - name: Build codetracer
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer"
           OVERRIDE="--override-input codetracer-trace-format path:./libs/codetracer-trace-format"
+          OVERRIDE_NIM="--override-input codetracer-trace-format-nim path:./libs/codetracer-trace-format-nim"
           # ``metacraft-labs-codetracer.cachix.org`` serves a stale
           # narinfo for the noir flake input keyed under a NAR-hash
           # that no longer matches the lockfile, so the build aborts
@@ -298,8 +365,8 @@ jobs:
           # entry, so the cached narHash gets replaced by what
           # upstream currently serves.
           REFRESH="--refresh"
-          nix build $SUBST_OVERRIDE $REFRESH -L ".?submodules=1#codetracer" $OVERRIDE -o result-ct
-          nix build $SUBST_OVERRIDE -L ".?submodules=1#db-backend" $OVERRIDE -o result-db
+          nix build $SUBST_OVERRIDE $REFRESH -L ".?submodules=1#codetracer" $OVERRIDE $OVERRIDE_NIM -o result-ct
+          nix build $SUBST_OVERRIDE -L ".?submodules=1#db-backend" $OVERRIDE $OVERRIDE_NIM -o result-db
           # Merge both outputs into a single bin directory so the extension
           # can find both ct and db-backend via a single runnablePath.
           mkdir -p combined-bin
