@@ -291,7 +291,31 @@ jobs:
           MARKER="codetracer-trace-format-nim-ci-sibling"
           NEEDLE="cp -r \${inputs.codetracer-trace-format} \$sourceRoot/../codetracer-trace-format"
 
-          if ! grep -F "$INPUT_MARKER" "$FLAKE_NIX" >/dev/null; then
+          has_trace_format_nim_input() {
+            awk '
+              /^[[:space:]]*#/ { next }
+              /^[[:space:]]*"?codetracer-trace-format-nim"?([.][A-Za-z0-9_-]+)?[[:space:]]*=/ {
+                found = 1
+              }
+              END { exit(found ? 0 : 1) }
+            ' "$FLAKE_NIX"
+          }
+
+          has_trace_format_nim_materialization() {
+            awk '
+              /^[[:space:]]*#/ { next }
+              /^[[:space:]]*cp[[:space:]]/ &&
+                index($0, "codetracer-trace-format-nim") &&
+                index($0, "$sourceRoot/../codetracer-trace-format-nim") {
+                found = 1
+              }
+              END { exit(found ? 0 : 1) }
+            ' "$DEFAULT_NIX"
+          }
+
+          if has_trace_format_nim_input; then
+            echo "codetracer flake already defines codetracer-trace-format-nim; keeping upstream input"
+          elif ! grep -F "$INPUT_MARKER" "$FLAKE_NIX" >/dev/null; then
             tmp="$(mktemp)"
             inside_trace_format=0
             inserted=0
@@ -321,7 +345,14 @@ jobs:
             fi
           fi
 
-          if ! grep -F "$MARKER" "$DEFAULT_NIX" >/dev/null; then
+          if ! has_trace_format_nim_input; then
+            echo "::error::failed to ensure $FLAKE_NIX has a trace-format-nim input"
+            exit 1
+          fi
+
+          if has_trace_format_nim_materialization; then
+            echo "codetracer default.nix already materializes codetracer-trace-format-nim"
+          elif ! grep -F "$MARKER" "$DEFAULT_NIX" >/dev/null; then
             tmp="$(mktemp)"
             while IFS= read -r line; do
               printf '%s\n' "$line" >> "$tmp"
@@ -338,7 +369,7 @@ jobs:
             mv "$tmp" "$DEFAULT_NIX"
           fi
 
-          if ! grep -F "$MARKER" "$DEFAULT_NIX" >/dev/null; then
+          if ! has_trace_format_nim_materialization; then
             echo "::error::failed to patch $DEFAULT_NIX with trace-format-nim sibling materialization"
             exit 1
           fi
