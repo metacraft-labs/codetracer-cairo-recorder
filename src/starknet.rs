@@ -376,8 +376,8 @@ pub fn write_starknet_trace(
     // M-capability-flags: Cairo's source map resolves each VM PC to a
     // single statement-start; column breakpoints and column motions
     // are both well-defined, so advertise the capabilities.
-    TraceWriter::enable_column_breakpoints_support(&mut *writer);
-    TraceWriter::enable_column_motions_support(&mut *writer);
+    writer.enable_column_breakpoints_support();
+    writer.enable_column_motions_support();
 
     // Best-effort per-line byte table for the trace path.  The path is
     // a JSON trace file (not a Cairo source), so the table only carries
@@ -1173,8 +1173,8 @@ pub fn write_replay_trace(tx_hash: &str, trace: &TransactionTrace, out_dir: &Pat
     // replay-navigation flag to advertise itself to downstream tools.
     TraceWriter::enable_column_aware_steps(&mut *writer);
     // M-capability-flags: see sibling call site above.
-    TraceWriter::enable_column_breakpoints_support(&mut *writer);
-    TraceWriter::enable_column_motions_support(&mut *writer);
+    writer.enable_column_breakpoints_support();
+    writer.enable_column_motions_support();
     let _ = TraceWriter::register_path_with_line_lengths(
         &mut *writer,
         &synthetic_path,
