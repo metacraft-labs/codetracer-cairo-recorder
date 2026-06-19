@@ -20,13 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       codetracer_ref:
-        description: 'Git ref for codetracer repo'
+        description: "Git ref for codetracer repo"
         required: false
-        default: ''
+        default: ""
       vscode_extension_ref:
-        description: 'Git ref for codetracer-vscode-extension repo'
+        description: "Git ref for codetracer-vscode-extension repo"
         required: false
-        default: ''
+        default: ""
 
   repository_dispatch:
     types: [cross-repo-test]
@@ -143,8 +143,8 @@ jobs:
           git submodule init
           # Rewrite submodule URLs with auth token for private repos
           for url in $(git config --get-regexp '^submodule\..*\.url$' \
-                       | grep -E 'git@github\.com:|https://github\.com/' \
-                       | cut -d' ' -f1); do
+            | grep -E 'git@github\.com:|https://github\.com/' \
+            | cut -d' ' -f1); do
             old_url=$(git config --get "$url")
             new_url=$(echo "$old_url" \
               | sed "s|git@github.com:|https://x-access-token:${GH_TOKEN}@github.com/|" \
@@ -180,7 +180,10 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-vscode-extension.git" \
             "$DEST"
-          if [ "$EXT_BRANCH" != "main" ]; then
+          if [ "$EXT_REF" != "main" ]; then
+            git -C "$DEST" fetch origin "$EXT_REF"
+            git -C "$DEST" checkout FETCH_HEAD
+          elif [ "$EXT_BRANCH" != "main" ]; then
             git -C "$DEST" fetch origin "$EXT_BRANCH"
             git -C "$DEST" checkout FETCH_HEAD
           fi
@@ -194,7 +197,6 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/nix-blockchain-development.git" \
             "$DEST"
-
 
       - name: Clone codetracer-trace-format as recorder Cargo sibling
         env:
@@ -238,7 +240,7 @@ jobs:
           DEST="$GITHUB_WORKSPACE/../codetracer-trace-format-nim"
           rm -rf "$DEST"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
-          git -C "$DEST" checkout "$TFN_REF" 2>/dev/null || true
+          git -C "$DEST" checkout "$TFN_REF"
 
       - name: Clone codetracer-trace-format into codetracer/libs (CI override)
         env:
