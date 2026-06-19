@@ -167,7 +167,11 @@ jobs:
           cd -
           if [ "$CT_REF" != "main" ]; then
             git -C "$DEST" fetch origin "$CT_REF"
-            git -C "$DEST" checkout "$CT_REF"
+            # FETCH_HEAD so the checkout works for both SHAs and branch
+            # names (a depth-1 clone has no local branch tracking ``dev``,
+            # so ``git checkout dev`` would fail with ``pathspec 'dev'
+            # did not match any file(s) known to git``).
+            git -C "$DEST" checkout FETCH_HEAD
           fi
 
       - name: Clone codetracer-vscode-extension
@@ -218,7 +222,8 @@ jobs:
           DEST="$GITHUB_WORKSPACE/../codetracer-trace-format"
           rm -rf "$DEST"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git" "$DEST"
-          git -C "$DEST" checkout "$TF_REF"
+          git -C "$DEST" fetch origin "$TF_REF"
+          git -C "$DEST" checkout FETCH_HEAD
 
       - name: Clone codetracer-trace-format-nim as recorder sibling
         env:
@@ -239,7 +244,8 @@ jobs:
           DEST="$GITHUB_WORKSPACE/../codetracer-trace-format-nim"
           rm -rf "$DEST"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git" "$DEST"
-          git -C "$DEST" checkout "$TFN_REF" 2>/dev/null || true
+          git -C "$DEST" fetch origin "$TFN_REF" 2>/dev/null || true
+          git -C "$DEST" checkout FETCH_HEAD 2>/dev/null || true
 
       - name: Clone codetracer-trace-format into codetracer/libs (CI override)
         env:
@@ -259,7 +265,8 @@ jobs:
           DEST="$GITHUB_WORKSPACE/../codetracer/libs/codetracer-trace-format"
           rm -rf "$DEST"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git" "$DEST"
-          git -C "$DEST" checkout "$TF_REF"
+          git -C "$DEST" fetch origin "$TF_REF"
+          git -C "$DEST" checkout FETCH_HEAD
 
       - name: Build codetracer
         run: |
