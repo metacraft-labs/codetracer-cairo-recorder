@@ -645,16 +645,32 @@ impl CairoTracer {
             // collapsing onto a single step at column 1.  Single-statement
             // lines (the overwhelming common case in Cairo fixtures)
             // yield a single column at the line's first non-whitespace
-            // byte — semantically equivalent to the legacy
-            // `register_step` path so existing step-count pins hold.
+            // byte.
             let stmt_columns = statement_columns_on_line(line_text);
-            for col in &stmt_columns {
+            let deferred_call_site_column =
+                (!recurse_before_step && stmt_columns.len() == 1 && !callees_on_line.is_empty())
+                    .then_some(stmt_columns[0]);
+            if deferred_call_site_column.is_some() {
+                // `register_step_with_column(Some(col))` expands to a line
+                // step plus a column-only step.  For a one-statement call
+                // site, emitting both before recursion gives DAP step-in an
+                // extra caller stop before the callee opens.  Emit only the
+                // caller line now and move the column nudge after recursion.
                 TraceWriter::register_step_with_column(
                     &mut *self.writer,
                     source_path,
                     Line(abs_line as i64),
-                    Some(Line(*col as i64)),
+                    None,
                 );
+            } else {
+                for col in &stmt_columns {
+                    TraceWriter::register_step_with_column(
+                        &mut *self.writer,
+                        source_path,
+                        Line(abs_line as i64),
+                        Some(Line(*col as i64)),
+                    );
+                }
             }
 
             // Attach pending `@T` / `ref T` reference emissions to the
@@ -808,6 +824,12 @@ impl CairoTracer {
                         var_values,
                         visited,
                     );
+                }
+                if let Some(col) = deferred_call_site_column {
+                    let delta = col as i64 - 1;
+                    if delta != 0 {
+                        TraceWriter::write_delta_column(&mut *self.writer, delta);
+                    }
                 }
             }
             line_offset += 1;

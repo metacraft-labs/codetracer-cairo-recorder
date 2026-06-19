@@ -408,7 +408,10 @@ fn test_recorded_trace_via_ct_print_json() {
     // open a compute child frame whose own source steps are navigable.
     // A regression here can still leave variables somewhere in the raw
     // event stream, while DAP stepping lands on the caller line with
-    // empty locals because the compute call has no body step range.
+    // empty locals because the compute call has no body step range.  This
+    // is the closest recorder-local assertion to the DAP/database view:
+    // the backend itself lives in the sibling codetracer repo, so here we
+    // pin the decoded call/step shape it consumes.
     let main_entry_pos = events
         .iter()
         .position(|e| {
@@ -503,22 +506,38 @@ fn test_recorded_trace_via_ct_print_json() {
         "DAP step-in needs a caller line-11 call-site step before compute opens; \
          events={events:?}"
     );
+    let call_site_step_index = events[first_call_site_step_pos]["step_index"]
+        .as_u64()
+        .expect("call-site step_index");
 
-    let call_site_steps: Vec<&serde_json::Value> = events
+    let pre_compute_call_site_steps: Vec<&serde_json::Value> = events[..compute_entry_pos]
         .iter()
         .filter(|e| e["kind"] == "step" && e["line"].as_u64() == Some(11))
         .collect();
-    assert!(
-        call_site_steps.iter().any(|e| e["function"]
-            .as_str()
-            .is_some_and(|f| f.ends_with("::main"))),
-        "main call-site line 11 must remain attributed to main; steps={call_site_steps:?}"
+    assert_eq!(
+        pre_compute_call_site_steps.len(),
+        1,
+        "single-statement call-site line 11 must emit one pre-callee DAP stop; \
+         an extra pre-callee column-only stop consumes stepIn before compute opens; \
+         steps={pre_compute_call_site_steps:?}"
     );
     assert!(
-        !call_site_steps.iter().any(|e| e["function"]
+        pre_compute_call_site_steps.iter().any(|e| e["function"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("::main"))),
+        "main call-site line 11 must remain attributed to main; steps={pre_compute_call_site_steps:?}"
+    );
+    assert!(
+        !pre_compute_call_site_steps.iter().any(|e| e["function"]
             .as_str()
             .is_some_and(|f| f.ends_with("::compute"))),
-        "main call-site line 11 must not be swallowed by compute; steps={call_site_steps:?}"
+        "main call-site line 11 must not be swallowed by compute; steps={pre_compute_call_site_steps:?}"
+    );
+    assert_eq!(
+        compute_entry_step,
+        call_site_step_index + 1,
+        "compute must open immediately after the one caller call-site stop; \
+         otherwise DAP stepIn can stop on the caller again; events={events:?}"
     );
 
     let continuation_step_pos = events
