@@ -110,6 +110,15 @@ package codetracer_cairo_recorder:
     const binarySuffix = (when defined(windows): ".exe" else: "")
     const recorderBinary =
       "target/release/codetracer-cairo-recorder" & binarySuffix
+    const traceFormatNimExtraPaths =
+      "../../codetracer-cairo-recorder/.reprobuild-src/libs/results/src:" &
+      "../../codetracer-cairo-recorder/.reprobuild-src/libs/nim-stew:" &
+      "../../codetracer-cairo-recorder/reprobuild/libs/results/src:" &
+      "../../codetracer-cairo-recorder/reprobuild/libs/nim-stew"
+    let traceFormatNimEnv = @[
+      ("CODETRACER_TRACE_FORMAT_NIM_SKIP_NIMBLE_INSTALL", "1"),
+      ("CODETRACER_TRACE_FORMAT_NIM_EXTRA_PATHS", traceFormatNimExtraPaths)
+    ]
 
     let recorderBuild = cargo.build(
       locked = true,
@@ -119,7 +128,8 @@ package codetracer_cairo_recorder:
         "Cargo.toml", "Cargo.lock",
         "src", "build.rs"
       ],
-      extraOutputs = @[recorderBinary])
+      extraOutputs = @[recorderBinary],
+      extraEnv = traceFormatNimEnv)
     discard collect("default", @[recorderBuild])
 
     # ---- Cairo corelib fetch + extract edge ---------------------------
@@ -188,6 +198,7 @@ package codetracer_cairo_recorder:
     # without re-rooting it against any base directory.
     let cairoCorelibAbsDir = absolutePath(CairoCorelibSrcDir)
     let cairoCorelibEnv = @[("CAIRO_CORELIB_DIR", cairoCorelibAbsDir)]
+    let testEnv = traceFormatNimEnv & cairoCorelibEnv
 
     let testsBuild = cargo.test(
       locked = true,
@@ -200,7 +211,7 @@ package codetracer_cairo_recorder:
         CairoCorelibMarker
       ],
       extraOutputs = @["target/debug/deps"],
-      extraEnv = cairoCorelibEnv)
+      extraEnv = testEnv)
 
     let testsRun = cargo.test(
       locked = true,
@@ -212,6 +223,6 @@ package codetracer_cairo_recorder:
         "target/debug/deps",
         CairoCorelibMarker
       ],
-      extraEnv = cairoCorelibEnv)
+      extraEnv = testEnv)
 
     discard collect("test", @[testsRun.action])
