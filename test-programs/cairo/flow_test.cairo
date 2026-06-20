@@ -8,5 +8,6 @@ fn compute() -> (felt252, felt252, felt252, felt252, felt252) {
 }
 
 fn main() -> (felt252, felt252, felt252, felt252, felt252) {
-    compute()
+    let result = compute();
+    result
 }

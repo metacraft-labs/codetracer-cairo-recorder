@@ -607,6 +607,36 @@ impl CairoTracer {
                 continue;
             }
 
+            // Direct tail-call expressions (`compute()`) need the callee's
+            // call range to open before the parent tail line is buffered.
+            // Otherwise the pending parent line is flushed as the callee's
+            // entry step, and DAP/source-flow consumers see the callee with
+            // an empty navigable body. Non-tail call statements and
+            // `let x = callee(...)` keep the legacy step-before-recursing
+            // order so binding values stay attached to the caller line.
+            let callees_on_line = &entry.callees_per_line[line_offset];
+            let recurse_before_step =
+                is_direct_tail_call_line(&lines, entry, line_offset, callees_on_line);
+            if recurse_before_step {
+                for callee in callees_on_line {
+                    self.emit_function_dfs(
+                        source_path,
+                        callee,
+                        fn_table,
+                        fn_returns,
+                        binding_names,
+                        compound_bindings,
+                        destructure_bindings,
+                        reference_emissions,
+                        typed_int_bindings,
+                        array_mutations,
+                        span_emissions,
+                        var_values,
+                        visited,
+                    );
+                }
+            }
+
             // FU-Column-Aware-Nav-Cairo: split the line into top-level
             // statements and emit one column-bearing step per statement
             // so multi-statement-per-line fixtures
@@ -615,16 +645,32 @@ impl CairoTracer {
             // collapsing onto a single step at column 1.  Single-statement
             // lines (the overwhelming common case in Cairo fixtures)
             // yield a single column at the line's first non-whitespace
-            // byte — semantically equivalent to the legacy
-            // `register_step` path so existing step-count pins hold.
+            // byte.
             let stmt_columns = statement_columns_on_line(line_text);
-            for col in &stmt_columns {
+            let deferred_call_site_column =
+                (!recurse_before_step && stmt_columns.len() == 1 && !callees_on_line.is_empty())
+                    .then_some(stmt_columns[0]);
+            if deferred_call_site_column.is_some() {
+                // `register_step_with_column(Some(col))` expands to a line
+                // step plus a column-only step.  For a one-statement call
+                // site, emitting both before recursion gives DAP step-in an
+                // extra caller stop before the callee opens.  Emit only the
+                // caller line now and move the column nudge after recursion.
                 TraceWriter::register_step_with_column(
                     &mut *self.writer,
                     source_path,
                     Line(abs_line as i64),
-                    Some(Line(*col as i64)),
+                    None,
                 );
+            } else {
+                for col in &stmt_columns {
+                    TraceWriter::register_step_with_column(
+                        &mut *self.writer,
+                        source_path,
+                        Line(abs_line as i64),
+                        Some(Line(*col as i64)),
+                    );
+                }
             }
 
             // Attach pending `@T` / `ref T` reference emissions to the
@@ -761,22 +807,30 @@ impl CairoTracer {
             // Recurse into any callees mentioned on this line.  Skipped
             // automatically when the callee was already visited
             // (`visited` set in `emit_function_dfs`).
-            for callee in &entry.callees_per_line[line_offset] {
-                self.emit_function_dfs(
-                    source_path,
-                    callee,
-                    fn_table,
-                    fn_returns,
-                    binding_names,
-                    compound_bindings,
-                    destructure_bindings,
-                    reference_emissions,
-                    typed_int_bindings,
-                    array_mutations,
-                    span_emissions,
-                    var_values,
-                    visited,
-                );
+            if !recurse_before_step {
+                for callee in callees_on_line {
+                    self.emit_function_dfs(
+                        source_path,
+                        callee,
+                        fn_table,
+                        fn_returns,
+                        binding_names,
+                        compound_bindings,
+                        destructure_bindings,
+                        reference_emissions,
+                        typed_int_bindings,
+                        array_mutations,
+                        span_emissions,
+                        var_values,
+                        visited,
+                    );
+                }
+                if let Some(col) = deferred_call_site_column {
+                    let delta = col as i64 - 1;
+                    if delta != 0 {
+                        TraceWriter::write_delta_column(&mut *self.writer, delta);
+                    }
+                }
             }
             line_offset += 1;
         }
@@ -2964,6 +3018,74 @@ fn parse_callees_in_line(line: &str, user_functions: &[&str]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether the current source line is a tail-position expression that is
+/// exactly one direct user-function call, e.g. `compute()` or
+/// `SomeImpl::run(x);`.
+///
+/// Such lines are caller/callee boundaries rather than ordinary caller
+/// work.  Entering the callee before registering the parent line keeps the
+/// callee's first real body step inside the callee call range; DAP-style
+/// navigation can then step into the callee and read its local variables.
+fn is_direct_tail_call_line(
+    lines: &[&str],
+    entry: &FunctionEntry,
+    line_offset: usize,
+    callees: &[String],
+) -> bool {
+    if callees.len() != 1 {
+        return false;
+    }
+
+    let abs_line = entry.start_line as usize + line_offset;
+    let raw_line = lines.get(abs_line - 1).copied().unwrap_or("");
+    let expr = raw_line
+        .split("//")
+        .next()
+        .unwrap_or(raw_line)
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    let expr = expr.strip_prefix("return ").map(str::trim).unwrap_or(expr);
+
+    if expr.is_empty() || expr.starts_with("fn ") || expr.starts_with("let ") {
+        return false;
+    }
+
+    let Some(paren) = expr.find('(') else {
+        return false;
+    };
+    if !expr.ends_with(')') {
+        return false;
+    }
+
+    let callee_expr = expr[..paren].trim();
+    let callee = &callees[0];
+    if callee_expr != callee {
+        return false;
+    }
+
+    // Tail position: there are no later executable source lines before the
+    // function closes. Closing braces (and loop-style `};`) do not count.
+    let next_abs = abs_line + 1;
+    let last_abs = entry.start_line as usize + entry.line_count.saturating_sub(1);
+    for later_abs in next_abs..=last_abs {
+        let later = lines
+            .get(later_abs - 1)
+            .copied()
+            .unwrap_or("")
+            .split("//")
+            .next()
+            .unwrap_or("")
+            .trim();
+        if later.is_empty() || later == "}" || later == "};" || later == "{" {
+            continue;
+        }
+        return false;
+    }
+
+    true
 }
 
 /// Compute a per-function return value (`Some(felt)`) where the
