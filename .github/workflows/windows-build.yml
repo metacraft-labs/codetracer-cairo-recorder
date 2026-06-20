@@ -6,6 +6,7 @@ on:
 
 jobs:
   windows-check:
+    # TODO: migrate to self-hosted Windows runner once provisioned.
     runs-on: windows-latest
     steps:
       - name: Generate CI token
