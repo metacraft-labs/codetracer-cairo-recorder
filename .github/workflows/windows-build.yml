@@ -21,98 +21,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Checkout metacraft-manifests (workspace locks)
-        uses: actions/checkout@v5
+      - name: Setup dev env
+        # setup-dev-env clones the listed siblings at the
+        # workspace-lock-pinned revisions and installs `dev-exec`, which
+        # replays this repo's Windows DIY dev env (env.ps1 → Rust,
+        # capnproto, Nim) for each wrapped command. This replaces the
+        # open-coded manifest/resolve/clone steps plus the
+        # dtolnay/rust-toolchain + choco capnproto/Nim installs.
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
-          repository: metacraft-labs/metacraft-manifests
-          ref: latest
-          path: _manifests
-          token: ${{ steps.app-token.outputs.token }}
+          env-flavor: windows-diy
+          gh-token: ${{ steps.app-token.outputs.token }}
+          siblings: |
+            codetracer-trace-format
+            codetracer-trace-format-nim
 
-      - name: Resolve cross-repo workspace-lock SHA
-        shell: bash
-        run: |
-          case "${{ github.event_name }}" in
-            pull_request) CANDS="${{ github.event.pull_request.base.sha }}" ;;
-            push) CANDS="${{ github.sha }} ${{ github.event.before }}" ;;
-            *) CANDS="${{ github.sha }}" ;;
-          esac
-          LOCK_SHA=""
-          for c in $CANDS; do
-            [ -z "$c" ] && continue
-            [ "$c" = "0000000000000000000000000000000000000000" ] && continue
-            if "${{ github.workspace }}/scripts/resolve-sibling-rev.sh" \
-                 --repo codetracer-cairo-recorder --sibling codetracer \
-                 --manifest-dir "${{ github.workspace }}/_manifests" \
-                 --sha "$c" --no-walk >/dev/null 2>&1; then
-              LOCK_SHA="$c"; break
-            fi
-          done
-          if [ -z "$LOCK_SHA" ]; then
-            echo "::error::No repo-workspaces workspace lock for codetracer-cairo-recorder (candidates: $CANDS). The commit must be published through the workspace tooling."
-            exit 1
-          fi
-          echo "CT_MANIFEST_DIR=${{ github.workspace }}/_manifests" >> "$GITHUB_ENV"
-          echo "CT_LOCK_SHA=$LOCK_SHA" >> "$GITHUB_ENV"
-          echo "Resolved cross-repo lock SHA for codetracer-cairo-recorder: $LOCK_SHA"
-
-      # `Cargo.toml` declares `codetracer_trace_types` and
-      # `codetracer_trace_writer_nim` as path dependencies in
-      # ../codetracer-trace-format/. The Linux Lint+Test job clones the
-      # sibling explicitly via .github/workflows/ci.yml; do the same here
-      # so `cargo check` can resolve them. Revision comes from the
-      # workspace lock so all platforms agree on the SHA.
-      - name: Clone codetracer-trace-format (Cargo path dependency)
-        shell: bash
-        run: |
-          # The resolver returns the workspace-locked SHA (not a branch
-          # name), so fetch that exact commit and check it out detached.
-          TF_REF="$("${{ github.workspace }}/scripts/resolve-sibling-rev.sh" \
-            --repo codetracer-cairo-recorder --sibling codetracer-trace-format \
-            --manifest-dir "$CT_MANIFEST_DIR" --sha "$CT_LOCK_SHA" --no-walk)"
-          TOKEN="${{ steps.app-token.outputs.token }}"
-          CLONE_URL="https://x-access-token:${TOKEN}@github.com/metacraft-labs/codetracer-trace-format.git"
-          target="${GITHUB_WORKSPACE}/../codetracer-trace-format"
-          rm -rf "${target}"
-          git clone --no-checkout "${CLONE_URL}" "${target}"
-          git -C "${target}" fetch --depth 1 origin "${TF_REF}"
-          git -C "${target}" checkout --detach FETCH_HEAD
-
-      - name: Clone codetracer-trace-format-nim (Nim FFI entry point)
-        # codetracer_trace_writer_nim's build.rs reads
-        # ``../codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim``
-        # at cargo compile time and panics without it.
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          # The resolver returns the workspace-locked SHA (not a branch
-          # name), so fetch that exact commit and check it out detached.
-          TFN_REF="$("${{ github.workspace }}/scripts/resolve-sibling-rev.sh" \
-            --repo codetracer-cairo-recorder --sibling codetracer-trace-format-nim \
-            --manifest-dir "$CT_MANIFEST_DIR" --sha "$CT_LOCK_SHA" --no-walk)"
-          CLONE_URL="https://x-access-token:${GH_TOKEN}@github.com/metacraft-labs/codetracer-trace-format-nim.git"
-          target="${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-          rm -rf "${target}"
-          git clone --no-checkout "${CLONE_URL}" "${target}"
-          git -C "${target}" fetch --depth 1 origin "${TFN_REF}"
-          git -C "${target}" checkout --detach FETCH_HEAD
-
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install capnproto
-        shell: pwsh
-        run: choco install capnproto -y
-      - name: Install Nim toolchain
-        # codetracer_trace_writer_nim's build.rs invokes ``nimble
-        # install --depsOnly`` to resolve the .nimble requires
-        # before compiling the FFI sources, so plain ``cargo check``
-        # needs nimble on PATH alongside nim.
-        shell: pwsh
-        run: |
-          choco install nim -y
-          $nimBin = (Get-ChildItem -Path "C:\tools\Nim\nim-*\bin" -Directory | Select-Object -First 1).FullName
-          if ($nimBin) { Add-Content -Path $env:GITHUB_PATH -Value $nimBin }
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\.nimble\bin"
       - name: Download Cairo corelib
         shell: pwsh
         run: |
@@ -126,6 +49,6 @@ jobs:
           Get-ChildItem "$dest\corelib\src" | Select-Object -First 3
           echo "CAIRO_CORELIB_DIR=$dest\corelib\src" >> $env:GITHUB_ENV
       - name: Check
-        run: cargo check
+        run: dev-exec cargo check
       - name: Test
-        run: cargo test
+        run: dev-exec cargo test
