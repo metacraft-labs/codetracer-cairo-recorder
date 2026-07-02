@@ -1,0 +1,56 @@
+name: Probe Windows Runner
+
+# Manual-dispatch diagnostic: reports the current state of
+# `windows-runner-001` so we can tell whether the PortableGit
+# auto-deploy has landed.  All steps run in pwsh so they succeed
+# even if bash.exe is not yet on PATH (which is the whole point of
+# probing).
+#
+# Triggered via `gh workflow run probe-windows-runner.yml` or the
+# GitHub UI.  Not on push/pull-request — this is on-demand only.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: [self-hosted, Windows, X64, nixos-equivalent]
+    steps:
+      - name: Runner PATH and bash resolvability
+        shell: pwsh
+        run: |
+          Write-Output "=== process PATH (from runner service) ==="
+          Write-Output $env:Path
+          Write-Output ""
+          Write-Output "=== SYSTEM PATH (from HKLM registry) ==="
+          $key = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+          (Get-ItemProperty -LiteralPath $key -Name Path).Path
+          Write-Output ""
+          Write-Output "=== bash.exe resolvable via Get-Command ==="
+          $bash = Get-Command bash -ErrorAction SilentlyContinue
+          if ($null -eq $bash) { Write-Output "NOT FOUND" } else { Write-Output $bash.Source }
+          Write-Output ""
+          Write-Output "=== PortableGit install marker (C:\PortableGit\bin\bash.exe) ==="
+          Test-Path 'C:\PortableGit\bin\bash.exe'
+          Write-Output ""
+          Write-Output "=== reprobuild bounce sentinel (C:\actions-runner-cache\portablegit-service-bounce.marker) ==="
+          $sentinel = 'C:\actions-runner-cache\portablegit-service-bounce.marker'
+          if (Test-Path $sentinel) {
+              Write-Output ("EXISTS: " + (Get-Content -LiteralPath $sentinel -Raw).Trim())
+          } else { Write-Output "MISSING" }
+          Write-Output ""
+          Write-Output "=== runner service status ==="
+          Get-Service -Name 'actions.runner.metacraft-labs.windows-runner-001' -ErrorAction SilentlyContinue |
+              Format-List Name, Status, StartType
+          Write-Output ""
+          Write-Output "=== runner service process PATH env-block probe ==="
+          # Get the RunnerService.exe process env-block via WMI.  This is
+          # what the service actually sees at runtime, distinct from a
+          # fresh pwsh session's $env:Path (which would inherit whatever
+          # this Actions job's parent had).
+          $runnerProc = Get-CimInstance Win32_Process -Filter "Name='RunnerService.exe'" -ErrorAction SilentlyContinue
+          if ($null -eq $runnerProc) { Write-Output "RunnerService.exe not running (or Listener runs under different name)" }
+          else {
+              Write-Output ("PID: " + $runnerProc.ProcessId)
+              Write-Output ("CommandLine: " + $runnerProc.CommandLine)
+          }
