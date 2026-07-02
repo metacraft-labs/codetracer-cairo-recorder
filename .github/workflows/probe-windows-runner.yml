@@ -17,7 +17,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, nixos-equivalent]
     steps:
       - name: Runner PATH and bash resolvability
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Output "=== process PATH (from runner service) ==="
           Write-Output $env:Path
