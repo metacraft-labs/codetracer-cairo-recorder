@@ -17,7 +17,13 @@ jobs:
     runs-on: [self-hosted, Windows, X64, nixos-equivalent]
     steps:
       - name: Runner PATH and bash resolvability
-        shell: powershell
+        # `pwsh` is not installed on the self-hosted Windows runner
+        # (it uses stock Windows PowerShell); `powershell` on the
+        # runner has ExecutionPolicy Restricted (default), so
+        # sending each command via `-Command` (default action's
+        # shell mode) rather than via a script file avoids the
+        # execution-policy block that hit the earlier attempt.
+        shell: 'powershell -NoProfile -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "{0}"'
         run: |
           Write-Output "=== process PATH (from runner service) ==="
           Write-Output $env:Path
