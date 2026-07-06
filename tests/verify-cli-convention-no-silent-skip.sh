@@ -23,16 +23,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Build the binary if it isn't already built (cargo build is a no-op
-# when nothing has changed).  We use --quiet so the output of this
-# script stays focused on verification results.
-( cd "${REPO_ROOT}" && cargo build --locked --quiet )
-
-BIN="${REPO_ROOT}/target/debug/codetracer-cairo-recorder"
-if [[ ! -x "${BIN}" ]]; then
-  echo "ERROR: recorder binary not found at ${BIN}" >&2
-  exit 1
-fi
+run_recorder() {
+  ( cd "${REPO_ROOT}" && cargo run --locked --quiet -- "$@" )
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,7 +36,7 @@ assert_absent() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" == *"${needle}"* ]]; then
     echo "FAIL: ${desc} must NOT contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
@@ -58,7 +51,7 @@ assert_present() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if ! grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" != *"${needle}"* ]]; then
     echo "FAIL: ${desc} must contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
@@ -68,11 +61,31 @@ assert_present() {
   echo "ok: '${needle}' present in ${desc}"
 }
 
+tree_contains() {
+  # tree_contains <needle> <root>
+  local needle="$1"
+  local root="$2"
+  local file line
+
+  shopt -s globstar nullglob
+  for file in "${root}"/**/*; do
+    [[ -f "${file}" ]] || continue
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" == *"${needle}"* ]]; then
+        shopt -u globstar nullglob
+        return 0
+      fi
+    done < "${file}"
+  done
+  shopt -u globstar nullglob
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Top-level --help
 # ---------------------------------------------------------------------------
 
-TOP_HELP="$("${BIN}" --help)"
+TOP_HELP="$(run_recorder --help)"
 
 assert_absent "--format" "top-level --help" "${TOP_HELP}"
 assert_absent "CODETRACER_FORMAT" "top-level --help" "${TOP_HELP}"
@@ -84,7 +97,7 @@ assert_present "ct print" "top-level --help" "${TOP_HELP}"
 # `record` subcommand --help
 # ---------------------------------------------------------------------------
 
-RECORD_HELP="$("${BIN}" record --help)"
+RECORD_HELP="$(run_recorder record --help)"
 
 assert_absent "--format" "record --help" "${RECORD_HELP}"
 assert_absent "CODETRACER_FORMAT" "record --help" "${RECORD_HELP}"
@@ -94,7 +107,7 @@ assert_present "--out-dir" "record --help" "${RECORD_HELP}"
 # `trace-starknet` subcommand --help
 # ---------------------------------------------------------------------------
 
-TRACE_HELP="$("${BIN}" trace-starknet --help)"
+TRACE_HELP="$(run_recorder trace-starknet --help)"
 
 assert_absent "--format" "trace-starknet --help" "${TRACE_HELP}"
 assert_absent "CODETRACER_FORMAT" "trace-starknet --help" "${TRACE_HELP}"
@@ -104,7 +117,7 @@ assert_present "--out-dir" "trace-starknet --help" "${TRACE_HELP}"
 # --version output
 # ---------------------------------------------------------------------------
 
-VERSION_OUT="$("${BIN}" --version)"
+VERSION_OUT="$(run_recorder --version)"
 assert_present "codetracer-cairo-recorder" "--version output" "${VERSION_OUT}"
 
 # ---------------------------------------------------------------------------
@@ -113,14 +126,14 @@ assert_present "codetracer-cairo-recorder" "--version output" "${VERSION_OUT}"
 
 # The recorder must reference CODETRACER_CAIRO_RECORDER_OUT_DIR in
 # source (otherwise the env-var fallback either doesn't exist or has
-# been silently removed).  We grep recursively under src/.
-if ! grep -rqF "CODETRACER_CAIRO_RECORDER_OUT_DIR" "${REPO_ROOT}/src"; then
+# been silently removed).
+if ! tree_contains "CODETRACER_CAIRO_RECORDER_OUT_DIR" "${REPO_ROOT}/src"; then
   echo "FAIL: CODETRACER_CAIRO_RECORDER_OUT_DIR must be referenced in src/" >&2
   exit 1
 fi
 echo "ok: CODETRACER_CAIRO_RECORDER_OUT_DIR referenced in src/"
 
-if ! grep -rqF "CODETRACER_CAIRO_RECORDER_DISABLED" "${REPO_ROOT}/src"; then
+if ! tree_contains "CODETRACER_CAIRO_RECORDER_DISABLED" "${REPO_ROOT}/src"; then
   echo "FAIL: CODETRACER_CAIRO_RECORDER_DISABLED must be referenced in src/" >&2
   exit 1
 fi
