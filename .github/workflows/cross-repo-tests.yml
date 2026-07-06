@@ -229,7 +229,7 @@ jobs:
         if: failure()
         run: |
           EXT_DIAG="$GITHUB_WORKSPACE/../codetracer-vscode-extension/test/wdio/diagnostics"
-          if [ -d "$EXT_DIAG" ]; then
+          if [ -d "$EXT_DIAG" ] && compgen -G "$EXT_DIAG/*" > /dev/null; then
             mkdir -p "$GITHUB_WORKSPACE/wdio-diagnostics"
             cp -r "$EXT_DIAG"/* "$GITHUB_WORKSPACE/wdio-diagnostics/"
           fi
