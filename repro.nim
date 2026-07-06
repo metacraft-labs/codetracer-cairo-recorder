@@ -231,14 +231,25 @@ package codetracer_cairo_recorder:
         "zstd_flags=\"\"; " &
         "if command -v nix >/dev/null 2>&1; then " &
           "zstd_dev=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.dev 2>/dev/null || true)\"; " &
+          "zstd_lib=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.lib 2>/dev/null || true)\"; " &
           "zstd_out=\"$(nix build --no-link --print-out-paths nixpkgs#zstd 2>/dev/null || true)\"; " &
           "if [ -n \"$zstd_dev\" ] && [ -f \"$zstd_dev/include/zstd.h\" ]; then " &
             "zstd_flags=\"$zstd_flags --passC:-I$zstd_dev/include\"; " &
           "fi; " &
-          "if [ -n \"$zstd_out\" ] && [ -d \"$zstd_out/lib\" ]; then " &
+          "if [ -n \"$zstd_lib\" ] && [ -d \"$zstd_lib/lib\" ]; then " &
+            "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib/lib\"; " &
+          "elif [ -n \"$zstd_out\" ] && [ -d \"$zstd_out/lib\" ]; then " &
             "zstd_flags=\"$zstd_flags --passL:-L$zstd_out/lib\"; " &
           "fi; " &
         "fi; " &
+        "case \"$zstd_flags\" in *--passL:-L*) ;; *) " &
+          "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
+            "if [ -n \"$zstd_lib\" ] && { [ -f \"$zstd_lib/libzstd.dylib\" ] || " &
+                "[ -f \"$zstd_lib/libzstd.so\" ] || [ -f \"$zstd_lib/libzstd.a\" ]; }; then " &
+              "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib\"; break; " &
+            "fi; " &
+          "done; unset IFS; " &
+        "esac; " &
         "if [ -z \"$zstd_flags\" ] && command -v pkg-config >/dev/null 2>&1; then " &
           "for flag in $(pkg-config --cflags libzstd 2>/dev/null || true); do " &
             "zstd_flags=\"$zstd_flags --passC:$flag\"; " &
