@@ -229,12 +229,22 @@ package codetracer_cairo_recorder:
         "set -euo pipefail; " &
         "recorder_root=\"$PWD\"; " &
         "zstd_flags=\"\"; " &
-        "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
-          "zstd_include=\"${zstd_lib%/lib}/include\"; " &
-          "if [ -n \"$zstd_lib\" ] && [ -f \"$zstd_include/zstd.h\" ]; then " &
-            "zstd_flags=\"--passC:-I$zstd_include --passL:-L$zstd_lib\"; break; " &
-          "fi; " &
-        "done; unset IFS; " &
+        "if command -v pkg-config >/dev/null 2>&1; then " &
+          "for flag in $(pkg-config --cflags libzstd 2>/dev/null || true); do " &
+            "zstd_flags=\"$zstd_flags --passC:$flag\"; " &
+          "done; " &
+          "for flag in $(pkg-config --libs libzstd 2>/dev/null || true); do " &
+            "zstd_flags=\"$zstd_flags --passL:$flag\"; " &
+          "done; " &
+        "fi; " &
+        "if [ -z \"$zstd_flags\" ]; then " &
+          "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
+            "zstd_include=\"${zstd_lib%/lib}/include\"; " &
+            "if [ -n \"$zstd_lib\" ] && [ -f \"$zstd_include/zstd.h\" ]; then " &
+              "zstd_flags=\"--passC:-I$zstd_include --passL:-L$zstd_lib\"; break; " &
+            "fi; " &
+          "done; unset IFS; " &
+        "fi; " &
         "if [ -z \"$zstd_flags\" ]; then " &
           "zstd_bin=\"$(command -v zstd 2>/dev/null || command -v zstd.exe 2>/dev/null || true)\"; " &
           "zstd_root=\"${zstd_bin%/*}\"; " &
