@@ -8,10 +8,14 @@
 ## Per ``codetracer-specs/Repo-Requirements.md`` §2.8 the recipe
 ## expresses build and test execution NATIVELY through typed-tool
 ## edges (`cargo.build`, `cargo.test`). It does NOT delegate to
-## `shell(command = "bash scripts/...")` wrappers — delegation
-## defeats the engine's incremental-build, action-cache, per-test
-## invalidation, and the CI sharding the engine grows into per
-## ``reprobuild-specs/CI-Sharding.md``.
+## `shell(command = "bash scripts/...")` wrappers for the Rust build /
+## test — delegation defeats the engine's incremental-build,
+## action-cache, per-test invalidation, and the CI sharding the engine
+## grows into per ``reprobuild-specs/CI-Sharding.md``. Two ``sh.shell``
+## edges below wrap the NON-cargo steps ``just test`` also runs (the
+## cairo-corelib provisioning and the CLI-convention verification
+## script), so ``repro test`` reproduces the FULL ``just test`` set
+## rather than a subset.
 ##
 ## On Windows the recipe drives real reprobuild tool provisioning via
 ## the tarball entries the ``uses:`` packages declare (cargo, rustc,
@@ -21,69 +25,106 @@
 ## CI cross-checks this through the side-by-side `ci.yml` (nix) +
 ## `ci-reprobuild.yml` (reprobuild) flow per Repo-Requirements §2.9.
 ##
-## Cairo: cairo-lang-compiler corelib lookup uses `CAIRO_CORELIB_DIR`.
-## The corelib is platform-independent Cairo source (a tree of `.cairo`
-## files), not a binary, and the cairo-lang-* crates load it at runtime
-## via the env var. M6 (reprobuild Windows migration) wires the fetch
-## + extract step into the recipe via a typed `sh.shell` action below;
-## the recipe then feeds the resolved corelib path into the cargo test
-## edges via the typed-tool `extraEnv = @[("CAIRO_CORELIB_DIR", ...)]`
-## parameter (MR10 closed the per-edge env-injection gap).
+## **This repo is a Rust CONSUMER of two sibling crates, but NOT a
+## reprobuild ``uses: "<sibling>"`` consumer.** The recorder's
+## ``Cargo.toml`` pulls in two crates from the sibling
+## ``codetracer-trace-format`` repo via cargo ``path`` dependencies:
+## ``codetracer_trace_types`` and ``codetracer_trace_writer_nim``. Both
+## are resolved and compiled INSIDE cargo — out of reprobuild's reach —
+## so they are NOT reprobuild library-threaded ``uses:`` consumptions
+## (the SC-11 develop-mode src-threading applies only to reprobuild's
+## own ``nim.c`` edges, and ``codetracer-trace-format`` is a Rust
+## workspace, not a Nim-library sibling in the AVAILABLE set). This
+## matches how the sibling recorders (circom, evm, fuel, …) model the
+## identical dependency: the toolchain floor for the Nim FFI that
+## ``codetracer_trace_writer_nim``'s ``build.rs`` compiles at cargo
+## build time (``nim`` + ``nimble`` + ``capnp`` + ``zstd``) is declared
+## in ``uses:``, and cargo does the cross-crate wiring itself. The
+## recorder crate itself has NO ``build.rs`` — the only cargo-build
+## inputs are the manifest, the lock, and the ``src`` tree.
+##
+## **Per-test platform gating.** ``just test`` is ``cargo test
+## --locked`` followed by the CLI-convention shell script — no test
+## FILE in this repo carries a per-host gate. All five integration test
+## files (``test_cli.rs``, ``test_column_aware.rs``, ``test_ctfs_audit.rs``,
+## ``test_replay_rpc.rs``, ``test_tracer.rs``) plus the ``src`` unit
+## tests contain NO ``#[cfg(target_os = …)]`` / ``#[ignore]`` selection:
+## they compile ``.cairo`` fixtures via the bundled cairo-lang-* crates
+## and decode the produced ``.ct`` container through the
+## ``codetracer-trace-format-nim`` ``ct-print`` binary on EVERY host.
+## ``test_replay_rpc.rs`` exercises a localhost mock JSON-RPC server
+## (``TcpListener::bind("127.0.0.1:0")`` — no external network egress),
+## so it too runs unconditionally. The single whole-workspace
+## ``cargo.test`` execute edge therefore matches the repo's own ``just
+## test`` one-for-one — there is no per-OS partition to model. The shell
+## verify edge is POSIX-portable (``bash``) and likewise unconditional.
+##
+## **Tool provisioning.** ``defaultToolProvisioning "path"`` matches the
+## canonical Rust-recorder recipes: the nix dev shell puts ``cargo`` /
+## ``rustc`` / ``nim`` / ``nimble`` / ``capnp`` / ``zstd`` on ``PATH``
+## (and ``PKG_CONFIG_PATH`` for libzstd + openssl), so the weak-local
+## PATH resolver is the right default. Without it ``repro build``
+## refuses to run with "typed tool provisioning is required for uses
+## declarations".
+##
+## **Cairo corelib.** The cairo-lang-compiler crates need the Cairo
+## standard library source tree at runtime, resolved via the
+## ``CAIRO_CORELIB_DIR`` env var (the recorder's integration tests
+## compile ``.cairo`` fixtures and panic without ``lib.cairo``
+## reachable). The nix dev shell + ``ci.yml`` provision it by fetching
+## the corelib source pinned to the ``cairo-lang-*`` crate version. The
+## recipe reproduces that step as a typed ``sh.shell`` edge (the package
+## DSL only models tool-binary provisioning, so a data-only source tree
+## consumed by an env var has no ``tarball``/``nixPackage`` shape yet)
+## and threads the resolved absolute path into the cargo test edges via
+## the typed-tool ``extraEnv`` parameter (MR10 per-edge env injection).
 
 import os
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
 
-## M6 corelib provisioning (Windows migration of
-## `ensure-cairo-corelib.ps1`):
-## reprobuild's package DSL (repro_dsl_stdlib/packages/packages_schema)
-## only models tool-binary provisioning — every `tarball` / `nixPackage`
-## / `scoopApp` form requires an `executablePath`. A data-only package
-## shape (a tarball whose payload is a tree of source files consumed by
-## an env var at runtime, with no executable) doesn't fit. Until the
-## schema gains a `dataPackage` / `headers_only` shape we land a
-## recipe-local `sh.shell` action that downloads + extracts the corelib
-## at build time. MR10 added per-edge env-var injection to the typed-
-## tool DSL (`recordToolInvocation` / generated `cargo.test` wrappers
-## now accept `extraEnv = openArray[(string, string)]`), so the
-## `CAIRO_CORELIB_DIR` env var is now threaded directly into the cargo
-## test edges below rather than relying on parent-process inheritance.
+## Cairo corelib provisioning.
+## Mirrors ``CAIRO_CORELIB_VERSION`` in ``windows/toolchain-versions.env``
+## and the recorder's pin in ``Cargo.toml``'s ``cairo-lang-*`` crates.
 const CairoCorelibVersion = "2.17.0-rc.4"
-  ## Mirrors `CAIRO_CORELIB_VERSION` in `windows/toolchain-versions.env`
-  ## and the recorder's pin in `Cargo.toml`'s `cairo-lang-*` crates.
 
 const CairoCorelibSrcDir =
   "build/cairo-corelib/" & CairoCorelibVersion & "/corelib/src"
 const CairoCorelibMarker = CairoCorelibSrcDir & "/lib.cairo"
-  ## `lib.cairo` is the canonical entry point cairo-lang-semantic's
-  ## helper.rs reads first; its presence is the "extraction succeeded"
-  ## signal the recipe's other edges depend on.
+  ## ``lib.cairo`` is the canonical entry point cairo-lang-semantic's
+  ## corelib loader reads first; its presence is the "extraction
+  ## succeeded" signal the recipe's test edges depend on.
 
 package codetracer_cairo_recorder:
+  defaultToolProvisioning "path"
+
   uses:
     # Rust toolchain — declared by version so the tarball-direct
     # provisioning entries in repro_dsl_stdlib/packages/cargo.nim /
-    # rustc.nim / rustfmt.nim resolve on Windows. On Linux/macOS the
-    # nix flake supplies the same versions.
+    # rustc.nim resolve on Windows. On Linux/macOS the nix flake
+    # supplies the same versions.
     "rustc >=1.85"
     "cargo >=1.85"
 
-    # Nim toolchain — codetracer_trace_writer_nim's build.rs compiles
-    # a static library at cargo build time.
+    # Nim toolchain — the sibling ``codetracer_trace_writer_nim`` crate's
+    # build.rs compiles a Nim FFI static library at cargo build time via
+    # ``nim c``; ``nimble`` resolves that FFI's nimble requirements.
     "nim >=2.2 <3.0"
     "nimble"
 
-    # Cap'n Proto schema compiler used by the recorder's build.rs.
+    # Cap'n Proto schema compiler used by the trace-format crates'
+    # build.rs (``capnpc`` over the trace schema).
     "capnp"
 
     # libzstd headers + library, needed when linking the Nim FFI
-    # static library into the cargo build.
+    # static library into the cargo build (the FFI's C output
+    # ``#include``s ``zstd.h`` and the CBOR+Zstd writer links libzstd).
     "zstd"
 
-    # `sh` (POSIX shell) drives the M6 cairo-corelib extraction edge
-    # below. Available on Windows via Git for Windows (`sh.exe` ships
-    # in PortableGit at `bin/sh.exe`); resolved by the standard `sh`
-    # package's tarball/scoop slice.
+    # POSIX shell — drives the cairo-corelib provisioning edge and the
+    # CLI-convention verification edge below, the same
+    # ``bash tests/verify-cli-convention-no-silent-skip.sh`` step
+    # ``just test`` runs after ``cargo test``.
     "sh"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
@@ -107,6 +148,18 @@ package codetracer_cairo_recorder:
     # reprobuild-specs/Build-Graph-Collections.md §"`default`"; this
     # makes ``repro build`` (no positional target) materialise this
     # edge's closure.
+    #
+    # ``locked = true`` because this repo DOES check in ``Cargo.lock``:
+    # the build must fail rather than silently regenerate the lock if a
+    # member's ``Cargo.toml`` or a sibling path-dep's resolution drifts
+    # from the pinned lock.
+    #
+    # The recorder has no ``build.rs`` of its own; the only inputs are
+    # the manifest, the lock, and the ``src`` tree. The sibling
+    # trace-format crates cargo pulls in via ``path`` deps are tracked
+    # per-crate at action-end by cargo's own ``.d`` depfiles under
+    # ``target/*/deps`` (the makeDepfile dependency policy the cargo
+    # package declares).
     const binarySuffix = (when defined(windows): ".exe" else: "")
     const recorderBinary =
       "target/release/codetracer-cairo-recorder" & binarySuffix
@@ -117,28 +170,27 @@ package codetracer_cairo_recorder:
       actionId = "codetracer-cairo-recorder.cargo-build",
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
-        "src", "build.rs"
+        "src"
       ],
       extraOutputs = @[recorderBinary])
     discard collect("default", @[recorderBuild])
 
     # ---- Cairo corelib fetch + extract edge ---------------------------
     #
-    # M6 (reprobuild Windows migration of `ensure-cairo-corelib.ps1`):
-    # the cairo-lang-compiler crates need the Cairo standard library
-    # source tree at runtime (resolved via `CAIRO_CORELIB_DIR`). Until
-    # the package schema grows a data-only shape (see "M6 gap" note at
-    # the top of this file), the recipe drives the fetch + extract via
-    # a typed `sh.shell` action. Output: `build/cairo-corelib/<ver>/
-    # corelib/src/lib.cairo` (the marker the downstream tests' input
-    # set tracks). The script is bash-portable and uses curl + tar,
-    # both present on Windows 10+ (via the OS-bundled `curl.exe` and
-    # `tar.exe`) and on Linux/macOS hosts.
+    # The cairo-lang-compiler crates need the Cairo standard library
+    # source tree at runtime (resolved via ``CAIRO_CORELIB_DIR``).
+    # Reproduces the ``ci.yml`` "Fetch Cairo corelib" step as a typed
+    # ``sh.shell`` action. Output:
+    # ``build/cairo-corelib/<ver>/corelib/src/lib.cairo`` (the marker the
+    # downstream test edges track). The script is bash-portable and uses
+    # ``curl`` + ``tar``, both present on Windows 10+ (via the
+    # OS-bundled ``curl.exe`` and ``tar.exe``) and on Linux/macOS hosts.
     #
-    # Source: starkware-libs/cairo releases tarball
-    # `release-x86_64-unknown-linux-musl.tar.gz` (the corelib is
-    # platform-independent Cairo source; the Linux musl asset is the
-    # smallest reliable mirror of the tree).
+    # Source: the ``starkware-libs/cairo`` source tag tarball
+    # (``archive/refs/tags/v<ver>.tar.gz``), whose ``corelib/`` tree is
+    # platform-independent Cairo source — the same asset ``ci.yml``
+    # pulls. Idempotent: re-extraction is skipped when ``lib.cairo``
+    # already exists.
     let corelibExtract = shell(
       command =
         "set -euo pipefail; " &
@@ -147,12 +199,12 @@ package codetracer_cairo_recorder:
         "if [ -f \"$out/lib.cairo\" ]; then exit 0; fi; " &
         "mkdir -p build/cairo-corelib; " &
         "tmp=$(mktemp -d); " &
-        "url=\"https://github.com/starkware-libs/cairo/releases/download/v${ver}/release-x86_64-unknown-linux-musl.tar.gz\"; " &
+        "url=\"https://github.com/starkware-libs/cairo/archive/refs/tags/v${ver}.tar.gz\"; " &
         "curl -fsSL -o \"$tmp/cairo.tar.gz\" \"$url\"; " &
         "stage=\"build/cairo-corelib/${ver}\"; " &
         "rm -rf \"$stage\"; " &
         "mkdir -p \"$stage\"; " &
-        "tar -xzf \"$tmp/cairo.tar.gz\" -C \"$stage\" --strip-components=1 cairo/corelib; " &
+        "tar -xzf \"$tmp/cairo.tar.gz\" -C \"$stage\" --strip-components=1 \"cairo-${ver}/corelib\"; " &
         "rm -rf \"$tmp\"; " &
         "test -f \"$out/lib.cairo\"",
       actionId = "codetracer-cairo-recorder.cairo-corelib-extract",
@@ -175,13 +227,17 @@ package codetracer_cairo_recorder:
     # §M4 — the whole-binary edge becomes a fan-out point without
     # changing this recipe.
     #
-    # The cairo-corelib marker is declared as a test-edge input so the
-    # engine sequences cairo-corelib extraction before cargo test (the
-    # integration tests panic without `lib.cairo` reachable from
-    # `CAIRO_CORELIB_DIR`).
-
+    # ``test-programs/`` is a declared input because every integration
+    # test opens a ``.cairo`` / ``.json`` fixture under it via
+    # ``CARGO_MANIFEST_DIR`` (e.g. ``test-programs/cairo/flow_test.cairo``,
+    # ``test-programs/starknet/mock_tx_trace.json``). The cairo-corelib
+    # marker is declared as a test-edge input so the engine sequences
+    # corelib extraction before the cargo test build/run (the integration
+    # tests panic without ``lib.cairo`` reachable from
+    # ``CAIRO_CORELIB_DIR``).
+    #
     # MR10: thread CAIRO_CORELIB_DIR into the cargo test edges directly
-    # via the typed-tool `extraEnv` parameter. The corelib path is
+    # via the typed-tool ``extraEnv`` parameter. The corelib path is
     # resolved to an absolute form at recipe-evaluation time because
     # cargo's cwd (the recorder crate root) differs from the recipe's
     # project root at runtime; the cairo-lang-* crates open the path
@@ -196,7 +252,7 @@ package codetracer_cairo_recorder:
       after = @[corelibExtract],
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
-        "src", "build.rs", "tests",
+        "src", "tests", "test-programs",
         CairoCorelibMarker
       ],
       extraOutputs = @["target/debug/deps"],
@@ -208,10 +264,37 @@ package codetracer_cairo_recorder:
       after = @[testsBuild.action, corelibExtract],
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
-        "src", "tests",
+        "src", "tests", "test-programs",
         "target/debug/deps",
         CairoCorelibMarker
       ],
       extraEnv = cairoCorelibEnv)
 
-    discard collect("test", @[testsRun.action])
+    # ---- CLI-convention verification edge -----------------------------
+    #
+    # ``just test`` runs ``bash
+    # tests/verify-cli-convention-no-silent-skip.sh`` after ``cargo
+    # test``. The script asserts the recorder's ``--help`` / ``--version``
+    # surface complies with ``Recorder-CLI-Conventions.md`` (no
+    # ``--format`` leak, ``--out-dir`` / ``ct print`` present, the two
+    # env-var fallbacks referenced in source). It is not a cargo target,
+    # so it is modelled as its own ``sh.shell`` execute edge rather than
+    # dropped — reproducing the repo's full ``just test`` set. The script
+    # itself does ``cargo build --locked --quiet`` (a no-op once the
+    # recorder is built), then runs the freshly-built debug binary at
+    # ``target/debug/codetracer-cairo-recorder``; ``after`` the cargo
+    # test-build edge guarantees that binary exists before the script
+    # runs. Non-cacheable: the script inspects a runtime binary via
+    # automatic monitoring and asserts on ``--help`` text, so it is
+    # re-run every ``repro test`` pass (matching ``just test``).
+    let cliVerify = shell(
+      command = "bash tests/verify-cli-convention-no-silent-skip.sh",
+      actionId = "codetracer-cairo-recorder.verify-cli-convention",
+      after = @[testsBuild.action],
+      extraInputs = @[
+        "tests/verify-cli-convention-no-silent-skip.sh",
+        "Cargo.toml", "Cargo.lock", "src"
+      ],
+      cacheable = false)
+
+    discard collect("test", @[testsRun.action, cliVerify])
