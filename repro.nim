@@ -229,7 +229,17 @@ package codetracer_cairo_recorder:
         "set -euo pipefail; " &
         "recorder_root=\"$PWD\"; " &
         "zstd_flags=\"\"; " &
-        "if command -v pkg-config >/dev/null 2>&1; then " &
+        "if command -v nix >/dev/null 2>&1; then " &
+          "zstd_dev=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.dev 2>/dev/null || true)\"; " &
+          "zstd_out=\"$(nix build --no-link --print-out-paths nixpkgs#zstd 2>/dev/null || true)\"; " &
+          "if [ -n \"$zstd_dev\" ] && [ -f \"$zstd_dev/include/zstd.h\" ]; then " &
+            "zstd_flags=\"$zstd_flags --passC:-I$zstd_dev/include\"; " &
+          "fi; " &
+          "if [ -n \"$zstd_out\" ] && [ -d \"$zstd_out/lib\" ]; then " &
+            "zstd_flags=\"$zstd_flags --passL:-L$zstd_out/lib\"; " &
+          "fi; " &
+        "fi; " &
+        "if [ -z \"$zstd_flags\" ] && command -v pkg-config >/dev/null 2>&1; then " &
           "for flag in $(pkg-config --cflags libzstd 2>/dev/null || true); do " &
             "zstd_flags=\"$zstd_flags --passC:$flag\"; " &
           "done; " &
@@ -253,6 +263,7 @@ package codetracer_cairo_recorder:
               "--passL:-L$zstd_root/static\"; " &
           "fi; " &
         "fi; " &
+        "echo \"ct-print zstd flags: ${zstd_flags:-<none>}\"; " &
         "cd ../codetracer-trace-format-nim; " &
         "if [ -d \"$recorder_root/.reprobuild-src/libs/results/src\" ] && " &
             "[ -d \"$recorder_root/.reprobuild-src/libs/nim-stew/src\" ]; then " &
