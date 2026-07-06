@@ -224,6 +224,17 @@ package codetracer_cairo_recorder:
       actionId = "codetracer-cairo-recorder.cairo-corelib-extract",
       extraOutputs = @[CairoCorelibMarker])
 
+    let ctPrintBuild = shell(
+      command =
+        "set -euo pipefail; " &
+        "cd ../codetracer-trace-format-nim; " &
+        "nimble install -y stew results; " &
+        "nim c -d:release --mm:arc -p:src -o:ct-print " &
+          "src/codetracer_ct_print.nim; " &
+        "test -f ct-print" & binarySuffix,
+      actionId = "codetracer-cairo-recorder.ct-print-build",
+      cacheable = false)
+
     # ---- Test-binary build + run edges (the `test` collection) -------
     #
     # Two-stage shape per Repo-Requirements.md §2.8: `cargo.test(noRun =
@@ -276,7 +287,7 @@ package codetracer_cairo_recorder:
     let testsRun = cargo.test(
       locked = true,
       actionId = "codetracer-cairo-recorder.cargo-test-run",
-      after = @[testsBuild.action, corelibExtract],
+      after = @[testsBuild.action, corelibExtract, ctPrintBuild],
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
         "src", "tests", "test-programs",
