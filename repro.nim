@@ -323,6 +323,24 @@ package codetracer_cairo_recorder:
             "elif [ -d \"$zstd_root/static\" ]; then zstd_lib_dir=\"$zstd_root/static\"; fi; " &
           "fi; " &
         "fi; " &
+        "IFS=:; for zstd_lib in ${zstd_lib_dir:-}:${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
+          "[ -n \"$zstd_lib\" ] || continue; " &
+          "if [ -f \"$zstd_lib/libzstd.dylib\" ] || [ -f \"$zstd_lib/libzstd.so\" ] || " &
+              "[ -f \"$zstd_lib/libzstd.a\" ] || [ -f \"$zstd_lib/libzstd.dll.a\" ] || " &
+              "[ -f \"$zstd_lib/libzstd_static.lib\" ]; then " &
+            "zstd_lib_dir=\"$zstd_lib\"; " &
+            "case \"$zstd_flags\" in *\"--passL:-L$zstd_lib\"*) ;; *) zstd_flags=\"$zstd_flags --passL:-L$zstd_lib\" ;; esac; " &
+            "break; " &
+          "fi; " &
+          "for zstd_real in \"$zstd_lib\"/libzstd.*.dylib \"$zstd_lib\"/libzstd.so.*; do " &
+            "[ -f \"$zstd_real\" ] || continue; " &
+            "zstd_link_dir=\"$recorder_root/.repro/zstd-link\"; mkdir -p \"$zstd_link_dir\"; " &
+            "case \"$zstd_real\" in *.dylib) ln -sf \"$zstd_real\" \"$zstd_link_dir/libzstd.dylib\" ;; *.so.*) ln -sf \"$zstd_real\" \"$zstd_link_dir/libzstd.so\" ;; esac; " &
+            "zstd_lib_dir=\"$zstd_link_dir\"; " &
+            "case \"$zstd_flags\" in *\"--passL:-L$zstd_link_dir\"*) ;; *) zstd_flags=\"$zstd_flags --passL:-L$zstd_link_dir\" ;; esac; " &
+            "break 2; " &
+          "done; " &
+        "done; unset IFS; " &
         "if [ -n \"$zstd_lib_dir\" ]; then " &
           "export LIBRARY_PATH=\"$zstd_lib_dir${LIBRARY_PATH:+:$LIBRARY_PATH}\"; " &
           "export NIX_LDFLAGS=\"-L$zstd_lib_dir ${NIX_LDFLAGS:-}\"; " &
