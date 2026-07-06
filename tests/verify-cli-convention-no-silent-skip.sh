@@ -23,16 +23,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Build the binary if it isn't already built (cargo build is a no-op
-# when nothing has changed).  We use --quiet so the output of this
-# script stays focused on verification results.
-( cd "${REPO_ROOT}" && cargo build --locked --quiet )
-
-BIN="${REPO_ROOT}/target/debug/codetracer-cairo-recorder"
-if [[ ! -x "${BIN}" ]]; then
-  echo "ERROR: recorder binary not found at ${BIN}" >&2
-  exit 1
-fi
+run_recorder() {
+  ( cd "${REPO_ROOT}" && cargo run --locked --quiet -- "$@" )
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +65,7 @@ assert_present() {
 # Top-level --help
 # ---------------------------------------------------------------------------
 
-TOP_HELP="$("${BIN}" --help)"
+TOP_HELP="$(run_recorder --help)"
 
 assert_absent "--format" "top-level --help" "${TOP_HELP}"
 assert_absent "CODETRACER_FORMAT" "top-level --help" "${TOP_HELP}"
@@ -84,7 +77,7 @@ assert_present "ct print" "top-level --help" "${TOP_HELP}"
 # `record` subcommand --help
 # ---------------------------------------------------------------------------
 
-RECORD_HELP="$("${BIN}" record --help)"
+RECORD_HELP="$(run_recorder record --help)"
 
 assert_absent "--format" "record --help" "${RECORD_HELP}"
 assert_absent "CODETRACER_FORMAT" "record --help" "${RECORD_HELP}"
@@ -94,7 +87,7 @@ assert_present "--out-dir" "record --help" "${RECORD_HELP}"
 # `trace-starknet` subcommand --help
 # ---------------------------------------------------------------------------
 
-TRACE_HELP="$("${BIN}" trace-starknet --help)"
+TRACE_HELP="$(run_recorder trace-starknet --help)"
 
 assert_absent "--format" "trace-starknet --help" "${TRACE_HELP}"
 assert_absent "CODETRACER_FORMAT" "trace-starknet --help" "${TRACE_HELP}"
@@ -104,7 +97,7 @@ assert_present "--out-dir" "trace-starknet --help" "${TRACE_HELP}"
 # --version output
 # ---------------------------------------------------------------------------
 
-VERSION_OUT="$("${BIN}" --version)"
+VERSION_OUT="$(run_recorder --version)"
 assert_present "codetracer-cairo-recorder" "--version output" "${VERSION_OUT}"
 
 # ---------------------------------------------------------------------------
