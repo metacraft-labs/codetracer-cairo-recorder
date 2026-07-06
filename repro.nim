@@ -254,6 +254,48 @@ package codetracer_cairo_recorder:
             "fi; " &
           "done; unset IFS; " &
         "esac; " &
+        "case \"$zstd_flags\" in *--passC:*) ;; *) " &
+          "if command -v pkg-config >/dev/null 2>&1; then " &
+            "for flag in $(pkg-config --cflags libzstd 2>/dev/null || true); do " &
+              "zstd_flags=\"$zstd_flags --passC:$flag\"; " &
+            "done; " &
+          "fi; " &
+        "esac; " &
+        "case \"$zstd_flags\" in *--passL:-L*) ;; *) " &
+          "if command -v pkg-config >/dev/null 2>&1; then " &
+            "for flag in $(pkg-config --libs libzstd 2>/dev/null || true); do " &
+              "zstd_flags=\"$zstd_flags --passL:$flag\"; " &
+              "case \"$flag\" in -L*) zstd_lib_dir=\"${flag#-L}\" ;; esac; " &
+            "done; " &
+          "fi; " &
+        "esac; " &
+        "zstd_bin=\"$(command -v zstd 2>/dev/null || command -v zstd.exe 2>/dev/null || true)\"; " &
+        "if [ -n \"$zstd_bin\" ]; then " &
+          "zstd_prefix=\"${zstd_bin%/*}\"; " &
+          "case \"$zstd_prefix\" in */bin) zstd_prefix=\"${zstd_prefix%/bin}\" ;; esac; " &
+          "case \"$zstd_flags\" in *--passC:*) ;; *) " &
+            "for zstd_include in \"$zstd_prefix/include\" \"${zstd_prefix%-bin}/include\" " &
+                "\"${zstd_prefix%-out}/include\" \"${zstd_prefix%-lib}/include\" " &
+                "\"${zstd_prefix%-dev}/include\"; do " &
+              "if [ -f \"$zstd_include/zstd.h\" ]; then " &
+                "zstd_flags=\"$zstd_flags --passC:-I$zstd_include\"; break; " &
+              "fi; " &
+            "done; " &
+          "esac; " &
+          "case \"$zstd_flags\" in *--passL:-L*) ;; *) " &
+            "for zstd_lib in \"$zstd_prefix/lib\" \"$zstd_prefix/dll\" \"$zstd_prefix/static\" " &
+                "\"${zstd_prefix%-bin}/lib\" \"${zstd_prefix%-out}/lib\" " &
+                "\"${zstd_prefix%-lib}/lib\"; do " &
+              "if [ -n \"$zstd_lib\" ] && { [ -f \"$zstd_lib/libzstd.dylib\" ] || " &
+                  "[ -f \"$zstd_lib/libzstd.so\" ] || [ -f \"$zstd_lib/libzstd.a\" ] || " &
+                  "[ -f \"$zstd_lib/libzstd.dll.a\" ] || [ -f \"$zstd_lib/libzstd.dll\" ] || " &
+                  "[ -f \"$zstd_lib/libzstd_static.lib\" ]; }; then " &
+                "zstd_lib_dir=\"$zstd_lib\"; " &
+                "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib\"; break; " &
+              "fi; " &
+            "done; " &
+          "esac; " &
+        "fi; " &
         "if [ -z \"$zstd_flags\" ] && command -v pkg-config >/dev/null 2>&1; then " &
           "for flag in $(pkg-config --cflags libzstd 2>/dev/null || true); do " &
             "zstd_flags=\"$zstd_flags --passC:$flag\"; " &
