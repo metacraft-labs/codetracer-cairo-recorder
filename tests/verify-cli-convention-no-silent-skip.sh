@@ -36,7 +36,7 @@ assert_absent() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" == *"${needle}"* ]]; then
     echo "FAIL: ${desc} must NOT contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
@@ -51,7 +51,7 @@ assert_present() {
   local needle="$1"
   local desc="$2"
   local haystack="$3"
-  if ! grep -qF -- "${needle}" <<< "${haystack}"; then
+  if [[ "${haystack}" != *"${needle}"* ]]; then
     echo "FAIL: ${desc} must contain '${needle}'" >&2
     echo "----- ${desc} -----" >&2
     echo "${haystack}" >&2
@@ -59,6 +59,26 @@ assert_present() {
     exit 1
   fi
   echo "ok: '${needle}' present in ${desc}"
+}
+
+tree_contains() {
+  # tree_contains <needle> <root>
+  local needle="$1"
+  local root="$2"
+  local file line
+
+  shopt -s globstar nullglob
+  for file in "${root}"/**/*; do
+    [[ -f "${file}" ]] || continue
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      if [[ "${line}" == *"${needle}"* ]]; then
+        shopt -u globstar nullglob
+        return 0
+      fi
+    done < "${file}"
+  done
+  shopt -u globstar nullglob
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -106,14 +126,14 @@ assert_present "codetracer-cairo-recorder" "--version output" "${VERSION_OUT}"
 
 # The recorder must reference CODETRACER_CAIRO_RECORDER_OUT_DIR in
 # source (otherwise the env-var fallback either doesn't exist or has
-# been silently removed).  We grep recursively under src/.
-if ! grep -rqF "CODETRACER_CAIRO_RECORDER_OUT_DIR" "${REPO_ROOT}/src"; then
+# been silently removed).
+if ! tree_contains "CODETRACER_CAIRO_RECORDER_OUT_DIR" "${REPO_ROOT}/src"; then
   echo "FAIL: CODETRACER_CAIRO_RECORDER_OUT_DIR must be referenced in src/" >&2
   exit 1
 fi
 echo "ok: CODETRACER_CAIRO_RECORDER_OUT_DIR referenced in src/"
 
-if ! grep -rqF "CODETRACER_CAIRO_RECORDER_DISABLED" "${REPO_ROOT}/src"; then
+if ! tree_contains "CODETRACER_CAIRO_RECORDER_DISABLED" "${REPO_ROOT}/src"; then
   echo "FAIL: CODETRACER_CAIRO_RECORDER_DISABLED must be referenced in src/" >&2
   exit 1
 fi
