@@ -293,6 +293,13 @@ package codetracer_cairo_recorder:
                 "zstd_lib_dir=\"$zstd_lib\"; " &
                 "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib\"; break; " &
               "fi; " &
+              "for zstd_real in \"$zstd_lib\"/libzstd.*.dylib \"$zstd_lib\"/libzstd.so.*; do " &
+                "[ -f \"$zstd_real\" ] || continue; " &
+                "zstd_link_dir=\"$recorder_root/.repro/zstd-link\"; mkdir -p \"$zstd_link_dir\"; " &
+                "case \"$zstd_real\" in *.dylib) ln -sf \"$zstd_real\" \"$zstd_link_dir/libzstd.dylib\" ;; *.so.*) ln -sf \"$zstd_real\" \"$zstd_link_dir/libzstd.so\" ;; esac; " &
+                "zstd_lib_dir=\"$zstd_link_dir\"; " &
+                "zstd_flags=\"$zstd_flags --passL:-L$zstd_link_dir\"; break 2; " &
+              "done; " &
             "done; " &
           "esac; " &
         "fi; " &
