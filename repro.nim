@@ -228,16 +228,31 @@ package codetracer_cairo_recorder:
       command =
         "set -euo pipefail; " &
         "recorder_root=\"$PWD\"; " &
+        "zstd_flags=\"\"; " &
+        "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
+          "zstd_include=\"${zstd_lib%/lib}/include\"; " &
+          "if [ -n \"$zstd_lib\" ] && [ -f \"$zstd_include/zstd.h\" ]; then " &
+            "zstd_flags=\"--passC:-I$zstd_include --passL:-L$zstd_lib\"; break; " &
+          "fi; " &
+        "done; unset IFS; " &
+        "if [ -z \"$zstd_flags\" ]; then " &
+          "zstd_bin=\"$(command -v zstd 2>/dev/null || command -v zstd.exe 2>/dev/null || true)\"; " &
+          "zstd_root=\"${zstd_bin%/*}\"; " &
+          "if [ -n \"$zstd_bin\" ] && [ -f \"$zstd_root/include/zstd.h\" ]; then " &
+            "zstd_flags=\"--passC:-I$zstd_root/include --passL:-L$zstd_root/dll " &
+              "--passL:-L$zstd_root/static\"; " &
+          "fi; " &
+        "fi; " &
         "cd ../codetracer-trace-format-nim; " &
         "if [ -d \"$recorder_root/.reprobuild-src/libs/results/src\" ] && " &
             "[ -d \"$recorder_root/.reprobuild-src/libs/nim-stew/src\" ]; then " &
-          "nim c -d:release --mm:arc -p:src " &
+          "nim c -d:release --mm:arc -p:src $zstd_flags " &
             "-p:\"$recorder_root/.reprobuild-src/libs/results/src\" " &
             "-p:\"$recorder_root/.reprobuild-src/libs/nim-stew/src\" " &
             "-o:ct-print src/codetracer_ct_print.nim; " &
         "else " &
           "nimble install -y stew results; " &
-          "nim c -d:release --mm:arc -p:src -o:ct-print " &
+          "nim c -d:release --mm:arc -p:src $zstd_flags -o:ct-print " &
             "src/codetracer_ct_print.nim; " &
         "fi; " &
         "test -f ct-print" & binarySuffix,
