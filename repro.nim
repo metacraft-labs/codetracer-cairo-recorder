@@ -90,6 +90,9 @@ package codetracer_cairo_recorder:
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
     # feature instead so neither is on the windows toolchain floor.
     when not defined(windows):
+      # Cargo build scripts look for ``cc`` by default; pass ``CC=clang``
+      # below and make clang part of the Unix dev environment.
+      "clang"
       "pkg-config"
       "openssl"
 
@@ -110,6 +113,9 @@ package codetracer_cairo_recorder:
     const binarySuffix = (when defined(windows): ".exe" else: "")
     const recorderBinary =
       "target/release/codetracer-cairo-recorder" & binarySuffix
+    let cargoCompilerEnv: seq[(string, string)] =
+      when defined(windows): @[]
+      else: @[("CC", "clang")]
 
     let recorderBuild = cargo.build(
       locked = true,
@@ -119,7 +125,8 @@ package codetracer_cairo_recorder:
         "Cargo.toml", "Cargo.lock",
         "src", "build.rs"
       ],
-      extraOutputs = @[recorderBinary])
+      extraOutputs = @[recorderBinary],
+      extraEnv = cargoCompilerEnv)
     discard collect("default", @[recorderBuild])
 
     # ---- Cairo corelib fetch + extract edge ---------------------------
@@ -188,6 +195,7 @@ package codetracer_cairo_recorder:
     # without re-rooting it against any base directory.
     let cairoCorelibAbsDir = absolutePath(CairoCorelibSrcDir)
     let cairoCorelibEnv = @[("CAIRO_CORELIB_DIR", cairoCorelibAbsDir)]
+    let cairoTestEnv = cargoCompilerEnv & cairoCorelibEnv
 
     let testsBuild = cargo.test(
       locked = true,
@@ -200,7 +208,7 @@ package codetracer_cairo_recorder:
         CairoCorelibMarker
       ],
       extraOutputs = @["target/debug/deps"],
-      extraEnv = cairoCorelibEnv)
+      extraEnv = cairoTestEnv)
 
     let testsRun = cargo.test(
       locked = true,
@@ -212,6 +220,6 @@ package codetracer_cairo_recorder:
         "target/debug/deps",
         CairoCorelibMarker
       ],
-      extraEnv = cairoCorelibEnv)
+      extraEnv = cairoTestEnv)
 
     discard collect("test", @[testsRun.action])
