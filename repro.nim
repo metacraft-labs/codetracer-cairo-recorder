@@ -229,6 +229,7 @@ package codetracer_cairo_recorder:
         "set -euo pipefail; " &
         "recorder_root=\"$PWD\"; " &
         "zstd_flags=\"\"; " &
+        "zstd_lib_dir=\"\"; " &
         "if command -v nix >/dev/null 2>&1; then " &
           "zstd_dev=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.dev 2>/dev/null || true)\"; " &
           "zstd_lib=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.lib 2>/dev/null || true)\"; " &
@@ -237,8 +238,10 @@ package codetracer_cairo_recorder:
             "zstd_flags=\"$zstd_flags --passC:-I$zstd_dev/include\"; " &
           "fi; " &
           "if [ -n \"$zstd_lib\" ] && [ -d \"$zstd_lib/lib\" ]; then " &
+            "zstd_lib_dir=\"$zstd_lib/lib\"; " &
             "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib/lib\"; " &
           "elif [ -n \"$zstd_out\" ] && [ -d \"$zstd_out/lib\" ]; then " &
+            "zstd_lib_dir=\"$zstd_out/lib\"; " &
             "zstd_flags=\"$zstd_flags --passL:-L$zstd_out/lib\"; " &
           "fi; " &
         "fi; " &
@@ -246,6 +249,7 @@ package codetracer_cairo_recorder:
           "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
             "if [ -n \"$zstd_lib\" ] && { [ -f \"$zstd_lib/libzstd.dylib\" ] || " &
                 "[ -f \"$zstd_lib/libzstd.so\" ] || [ -f \"$zstd_lib/libzstd.a\" ]; }; then " &
+              "zstd_lib_dir=\"$zstd_lib\"; " &
               "zstd_flags=\"$zstd_flags --passL:-L$zstd_lib\"; break; " &
             "fi; " &
           "done; unset IFS; " &
@@ -262,6 +266,7 @@ package codetracer_cairo_recorder:
           "IFS=:; for zstd_lib in ${LD_LIBRARY_PATH:-}:${DYLD_LIBRARY_PATH:-}; do " &
             "zstd_include=\"${zstd_lib%/lib}/include\"; " &
             "if [ -n \"$zstd_lib\" ] && [ -f \"$zstd_include/zstd.h\" ]; then " &
+              "zstd_lib_dir=\"$zstd_lib\"; " &
               "zstd_flags=\"--passC:-I$zstd_include --passL:-L$zstd_lib\"; break; " &
             "fi; " &
           "done; unset IFS; " &
@@ -272,7 +277,13 @@ package codetracer_cairo_recorder:
           "if [ -n \"$zstd_bin\" ] && [ -f \"$zstd_root/include/zstd.h\" ]; then " &
             "zstd_flags=\"--passC:-I$zstd_root/include --passL:-L$zstd_root/dll " &
               "--passL:-L$zstd_root/static\"; " &
+            "if [ -d \"$zstd_root/dll\" ]; then zstd_lib_dir=\"$zstd_root/dll\"; " &
+            "elif [ -d \"$zstd_root/static\" ]; then zstd_lib_dir=\"$zstd_root/static\"; fi; " &
           "fi; " &
+        "fi; " &
+        "if [ -n \"$zstd_lib_dir\" ]; then " &
+          "export LIBRARY_PATH=\"$zstd_lib_dir${LIBRARY_PATH:+:$LIBRARY_PATH}\"; " &
+          "export NIX_LDFLAGS=\"-L$zstd_lib_dir ${NIX_LDFLAGS:-}\"; " &
         "fi; " &
         "echo \"ct-print zstd flags: ${zstd_flags:-<none>}\"; " &
         "cd ../codetracer-trace-format-nim; " &
