@@ -79,9 +79,53 @@
 ## and threads the resolved absolute path into the cargo test edges via
 ## the typed-tool ``extraEnv`` parameter (MR10 per-edge env injection).
 
-import os
+import std/[os, strutils]
 import repro_project_dsl
 import repro_dsl_stdlib/packages/sh
+
+proc shellSingleQuote(value: string): string =
+  result = "'"
+  for ch in value:
+    if ch == char(39):
+      result.add("'\"'\"'")
+    else:
+      result.add(ch)
+  result.add("'")
+
+proc hasZstdLib(dir: string): bool =
+  if dir.len == 0:
+    return false
+  for filename in [
+    "libzstd.dylib", "libzstd.so", "libzstd.a",
+    "libzstd.dll.a", "libzstd.dll", "libzstd_static.lib"
+  ]:
+    if fileExists(dir / filename):
+      return true
+  for pattern in [dir / "libzstd.*.dylib", dir / "libzstd.so.*"]:
+    for path in walkFiles(pattern):
+      discard path
+      return true
+
+proc findProviderZstdLibDir(): string =
+  for envName in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "LIBRARY_PATH"]:
+    for dir in getEnv(envName).split(PathSep):
+      if hasZstdLib(dir):
+        return dir
+  for token in getEnv("NIX_LDFLAGS").splitWhitespace:
+    if token.len > 2 and token.startsWith("-L"):
+      let dir = token[2 .. ^1]
+      if hasZstdLib(dir):
+        return dir
+
+proc findProviderZstdIncludeDir(libDir: string): string =
+  if libDir.len > 0:
+    let candidate = parentDir(libDir) / "include"
+    if fileExists(candidate / "zstd.h"):
+      return candidate
+  for envName in ["CPATH", "C_INCLUDE_PATH"]:
+    for dir in getEnv(envName).split(PathSep):
+      if fileExists(dir / "zstd.h"):
+        return dir
 
 ## Cairo corelib provisioning.
 ## Mirrors ``CAIRO_CORELIB_VERSION`` in ``windows/toolchain-versions.env``
@@ -176,6 +220,13 @@ package codetracer_cairo_recorder:
       when defined(windows): @[]
       elif defined(macosx): @[("CC", "clang")]
       else: @[("CC", "gcc")]
+    let providerZstdLibDir = findProviderZstdLibDir()
+    let providerZstdIncludeDir = findProviderZstdIncludeDir(providerZstdLibDir)
+    let providerZstdPassC =
+      if providerZstdIncludeDir.len > 0:
+        "--passC:-I" & providerZstdIncludeDir
+      else:
+        ""
 
     let recorderBuild = cargo.build(
       locked = true,
@@ -228,8 +279,9 @@ package codetracer_cairo_recorder:
       command =
         "set -euo pipefail; " &
         "recorder_root=\"$PWD\"; " &
-        "zstd_flags=\"\"; " &
-        "zstd_lib_dir=\"\"; " &
+        "zstd_flags=" & shellSingleQuote(providerZstdPassC) & "; " &
+        "zstd_lib_dir=" & shellSingleQuote(providerZstdLibDir) & "; " &
+        "if [ -n \"$zstd_lib_dir\" ]; then echo \"provider zstd lib dir: $zstd_lib_dir\"; fi; " &
         "if command -v nix >/dev/null 2>&1; then " &
           "zstd_dev=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.dev 2>/dev/null || true)\"; " &
           "zstd_lib=\"$(nix build --no-link --print-out-paths nixpkgs#zstd.lib 2>/dev/null || true)\"; " &
