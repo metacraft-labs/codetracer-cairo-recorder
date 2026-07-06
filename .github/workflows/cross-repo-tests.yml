@@ -65,11 +65,11 @@ jobs:
 
       - name: Setup dev env
         # Installs nix and clones the cross-repo siblings adjacent to this
-        # checkout at workspace-lock-pinned revisions. workflow_dispatch /
-        # repository_dispatch ref inputs override the locked revision for
-        # codetracer + the extension (empty => lock). nix-blockchain-development
-        # is cloned bare (no override) for the recorder_exec mcl-blockchain
-        # flake override patched in below.
+        # checkout. workflow_dispatch / repository_dispatch ref inputs override
+        # the default current branches for codetracer + the extension; the
+        # trace-format repos follow the current main branches used by recorder
+        # flakes. nix-blockchain-development stays lock-pinned for the
+        # recorder_exec mcl-blockchain flake override patched in below.
         uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
         with:
           env-flavor: nix
@@ -80,10 +80,10 @@ jobs:
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           siblings: |
-            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref }}
-            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref }}
-            codetracer-trace-format
-            codetracer-trace-format-nim
+            codetracer=${{ github.event.inputs.codetracer_ref || github.event.client_payload.codetracer_ref || 'dev' }}
+            codetracer-vscode-extension=${{ github.event.inputs.vscode_extension_ref || github.event.client_payload.vscode_extension_ref || 'dev' }}
+            codetracer-trace-format=main
+            codetracer-trace-format-nim=main
             nix-blockchain-development
 
       - name: Provide codetracer-trace-format into codetracer/libs (CI override)
@@ -91,7 +91,7 @@ jobs:
         # ``--override-input codetracer-trace-format
         # path:./libs/codetracer-trace-format``.  The codetracer
         # checkout doesn't ship that directory, so we copy the
-        # sibling (already cloned at the lock-pinned revision by
+        # sibling (already cloned at the workflow-selected revision by
         # setup-dev-env) into the expected path before nix build.
         run: |
           SRC="$GITHUB_WORKSPACE/../codetracer-trace-format"
