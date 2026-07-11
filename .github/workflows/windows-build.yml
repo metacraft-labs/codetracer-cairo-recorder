@@ -6,8 +6,11 @@ on:
 
 jobs:
   windows-check:
-    # TODO: migrate to self-hosted Windows runner once provisioned.
-    runs-on: [self-hosted, Windows, X64, nixos-equivalent]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [win-ephemeral, win-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Generate CI token
         id: app-token

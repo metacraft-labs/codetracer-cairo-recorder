@@ -22,8 +22,12 @@ on:
 
 jobs:
   windows-diy:
-    name: Windows DIY — just build/test
-    runs-on: [self-hosted, Windows, X64, nixos-equivalent]
+    name: Windows DIY — just build/test (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [win-ephemeral, win-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +64,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-diy-logs
+          name: windows-diy-logs-${{ matrix.runner }}
           path: |
             target/
             test-logs/
