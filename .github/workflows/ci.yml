@@ -1,8 +1,12 @@
 name: CI
 
-# Re-plays the project's deterministic dev env on the runner.
+# Re-plays the project's deterministic dev env on the runner via the shared
+# reusable recorder-CI workflow (nixos-modules). Recorder-specific prep lives in
+# the `prepare-ci` just recipe; the shared workflow runs it after setup-dev-env
+# and before lint/test, then uploads logs to GitHub (short retention) and
+# mirrors them to the in-house S3 artifact store.
 # See:
-#   https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-shared-dev-env.md
+#   https://github.com/metacraft-labs/metacraft-dev-guidelines/blob/latest/policies/ci-workflow-standards.md
 
 on:
   push:
@@ -11,80 +15,8 @@ on:
     branches: [main, dev, stable]
 
 jobs:
-  lint-and-test:
-    name: Lint and test (${{ matrix.runner }})
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [eph-linux-x64, eph-linux-arm64, eph-macos-arm64]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate CI token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
-      - name: Setup dev env
-        # setup-dev-env clones the siblings listed in .github/sibling-repos
-        # (codetracer-trace-format, codetracer-trace-format-nim) at the
-        # workspace-lock-pinned revisions before materialising the nix env.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
-        with:
-          env-flavor: nix
-          gh-token: ${{ steps.app-token.outputs.token }}
-
-      - name: Build Nim trace writer library (sibling artifact)
-        # TODO: replace with `direnv exec ../codetracer-trace-format-nim
-        # just build-trace-writer-lib` once the sibling repo ships
-        # that target -- per cross-repo-builds.md.
-        run: |
-          dev-exec bash -c '
-            set -euo pipefail
-            cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-            nimble install -y stew results
-            nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
-              -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
-            # Build ct-print for tests that decode Layout-A traces.
-            # Mirrors the sibling repo'"'"'s `nimble buildCtPrint` task.
-            nim c -d:release --mm:arc -p:src \
-              -o:ct-print src/codetracer_ct_print.nim
-          '
-          echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "$GITHUB_ENV"
-
-      - name: Fetch Cairo corelib
-        # tests/test_ctfs_audit.rs invokes the recorder which loads
-        # the Cairo corelib from $CAIRO_CORELIB_DIR.  Pull the
-        # version pinned in Cargo.toml so the corelib matches the
-        # compiler crates.
-        # TODO: package this in the flake's dev shell so local dev
-        # picks it up via the same path.
-        run: |
-          set -euo pipefail
-          CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml \
-            | head -1 | sed 's/.*"\(.*\)"/\1/')
-          curl -fsSL \
-            "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
-            -o cairo-src.tar.gz
-          tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
-          mv "cairo-${CAIRO_VERSION}/corelib" corelib
-          rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
-          echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "$GITHUB_ENV"
-
-      - name: Lint
-        run: dev-exec just lint
-
-      - name: Test
-        run: dev-exec just test
-
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-logs-${{ matrix.runner }}
-          path: target/
-          retention-days: 7
+  ci:
+    uses: metacraft-labs/nixos-modules/.github/workflows/reusable-recorder-ci.yml@main
+    with:
+      prepare-recipe: prepare-ci
+    secrets: inherit

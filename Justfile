@@ -31,6 +31,38 @@ format:
   cargo fmt
 
 fmt: format
+
+# Recorder-specific CI preparation, run by the shared reusable-recorder-ci
+# workflow (nixos-modules) after setup-dev-env and before lint/test. Builds the
+# Nim trace-writer sibling library + ct-print, and fetches the Cairo corelib
+# pinned in Cargo.toml. Exports the paths tests need to $GITHUB_ENV when running
+# under GitHub Actions (a no-op file otherwise). Shebang recipe so the shell
+# state persists across the steps.
+# TODO: fold the corelib + sibling lib into the flake devShell so local dev and
+# CI share one path (per cross-repo-builds.md); then this recipe shrinks.
+prepare-ci:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  # Build the Nim trace-writer sibling static lib + ct-print (Layout-A decode).
+  (
+    cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
+    nimble install -y stew results
+    nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
+      -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
+    nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
+  )
+  echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "${GITHUB_ENV:-/dev/null}"
+  # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
+  # $CAIRO_CORELIB_DIR).
+  CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+  curl -fsSL \
+    "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
+    -o cairo-src.tar.gz
+  tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
+  mv "cairo-${CAIRO_VERSION}/corelib" corelib
+  rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
+  echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "${GITHUB_ENV:-/dev/null}"
+
 # --- M13: Packaging UX Standardization ---
 # These recipes implement Repo-Requirements.md §2.8. The OS-packaged
 # recorders share a uniform packaging surface: `bump-version` rewrites
