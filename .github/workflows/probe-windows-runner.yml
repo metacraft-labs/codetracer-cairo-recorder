@@ -14,7 +14,7 @@ on:
 
 jobs:
   probe:
-    runs-on: [self-hosted, Windows, X64, nixos-equivalent]
+    runs-on: [self-hosted, Windows, X64, dev-env-ready]
     steps:
       - name: Runner PATH and bash resolvability
         # `pwsh` is not installed on the self-hosted Windows runner
