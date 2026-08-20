@@ -133,6 +133,11 @@ package codetracer_cairo_recorder:
     when not defined(windows):
       "pkg-config"
       "openssl"
+    # `choco pack` / `choco push` in .github/workflows/publish-chocolatey.yml.
+    # Windows-guarded because Chocolatey is a Windows package manager with no
+    # POSIX build, so an unguarded entry would fail to resolve on Linux/macOS.
+    when defined(windows):
+      "chocolatey"
 
   executable codetracerCairoRecorder:
     name: "codetracer-cairo-recorder"
