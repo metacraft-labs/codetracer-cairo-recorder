@@ -31,7 +31,7 @@ jobs:
         # capnproto, Nim) for each wrapped command. This replaces the
         # open-coded manifest/resolve/clone steps plus the
         # dtolnay/rust-toolchain + choco capnproto/Nim installs.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}

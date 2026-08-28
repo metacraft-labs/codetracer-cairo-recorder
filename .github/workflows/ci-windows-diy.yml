@@ -45,7 +45,7 @@ jobs:
         # Cairo's env.ps1 dot-sources `../codetracer/env.ps1` for the
         # shared CodeTracer toolchain, so `codetracer` is added to the
         # common trace-format build set via an explicit `siblings:` input.
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}
