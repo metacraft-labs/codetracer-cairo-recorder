@@ -360,10 +360,13 @@ fn test_recorded_trace_via_ct_print_json() {
         Some(10),
         "expected 10 step events for flow_test.cairo; counts={counts}",
     );
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         counts["calls"].as_u64(),
-        Some(2),
-        "expected 2 call events (compute + main); counts={counts}",
+        Some(3),
+        "expected 3 call events (<toplevel> + main + compute); counts={counts}",
     );
 
     let events = doc["events"].as_array().expect("events array");
@@ -378,20 +381,28 @@ fn test_recorded_trace_via_ct_print_json() {
         .filter(|e| e["kind"] == "call_entry")
         .filter_map(|e| e["function"].as_str())
         .collect();
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         call_sequence.len(),
-        2,
-        "expected exactly 2 call_entry events; got {:?}",
+        3,
+        "expected exactly 3 call_entry events; got {:?}",
+        call_sequence
+    );
+    assert_eq!(
+        call_sequence[0], "<toplevel>",
+        "expected the call tree's root to open first; got {:?}",
         call_sequence
     );
     assert!(
-        call_sequence[0].ends_with("::main"),
-        "expected first call to be `main` (program entry point); got {:?}",
+        call_sequence[1].ends_with("::main"),
+        "expected second call to be `main` (program entry point); got {:?}",
         call_sequence
     );
     assert!(
-        call_sequence[1].ends_with("::compute"),
-        "expected second call to be `compute` (called from main); got {:?}",
+        call_sequence[2].ends_with("::compute"),
+        "expected third call to be `compute` (called from main); got {:?}",
         call_sequence
     );
 
@@ -891,14 +902,24 @@ fn test_control_flow_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(functions.len(), 5, "functions: {:?}", functions);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(functions.len(), 6, "functions: {:?}", functions);
     let bare_fns: Vec<&str> = functions
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
     assert_eq!(
         bare_fns,
-        vec!["main", "compute", "classify", "loop_sum", "match_pick"]
+        vec![
+            "<toplevel>",
+            "main",
+            "compute",
+            "classify",
+            "loop_sum",
+            "match_pick"
+        ]
     );
 
     // ----- Path table -------------------------------------------------
@@ -916,7 +937,10 @@ fn test_control_flow_test_via_ct_print_full() {
     // compute(7) + main(2) + 1 trailing return_value step.  5 calls.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(28), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -938,16 +962,23 @@ fn test_control_flow_test_via_ct_print_full() {
     // array now mirrors `counts["values"]` step rows (28 absolute +
     // 23 column-delta = 51) plus the 5 call_entry / 5 call_exit
     // frames = 61 events.
-    assert_eq!(events.len(), 38, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 40, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
     // Post bug-fix 1+2: the DFS rooted at `main` recurses through
     // each callee's invocation site as it appears in the parent body,
     // so the recorded call_entry sequence is the dynamic call order.
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "classify".to_string(),
@@ -964,6 +995,9 @@ fn test_control_flow_test_via_ct_print_full() {
     // M-cairo column-aware emission landed: the column-aware writer
     // flushes completed CallRecords in strict LIFO order, so compute
     // closes before main even though they co-exit at the same step.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -972,6 +1006,7 @@ fn test_control_flow_test_via_ct_print_full() {
             "match_pick".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -982,11 +1017,25 @@ fn test_control_flow_test_via_ct_print_full() {
     // the VM's `RunResultValue::Success` payload mapped onto the
     // `let X = callee(...)` source pattern, then propagated through
     // the `compute()` tuple-return slots.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -1049,9 +1098,13 @@ fn test_control_flow_test_call_sequence_dynamic_order() {
     ) else {
         return;
     };
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "classify".to_string(),
@@ -1096,9 +1149,12 @@ fn test_nested_calls_test_via_ct_print_full() {
     // respectively but those callees were already visited at the
     // compute level, so the visited-set short-circuits keep the call
     // table at the spec-pinned 5 entries.
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         bare_fns,
-        vec!["main", "compute", "inner", "middle", "outer"]
+        vec!["<toplevel>", "main", "compute", "inner", "middle", "outer"]
     );
 
     // ----- counts -----------------------------------------------------
@@ -1106,7 +1162,10 @@ fn test_nested_calls_test_via_ct_print_full() {
     // + 1 trailing.  5 calls, 0 io_events.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(15), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(6), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1128,15 +1187,22 @@ fn test_nested_calls_test_via_ct_print_full() {
     // array now mirrors `counts["values"]` step rows (15 absolute +
     // 10 column-delta = 25) plus the 5 call_entry / 5 call_exit
     // frames = 35 events.
-    assert_eq!(events.len(), 25, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 27, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence: dynamic execution order --------------------
     // Bug-fix 1+2: DFS from `main` recurses through compute's three
     // call sites in source-text order (`inner`, `middle`, `outer`).
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "inner".to_string(),
@@ -1152,6 +1218,9 @@ fn test_nested_calls_test_via_ct_print_full() {
     // landed: the column-aware writer flushes completed CallRecords
     // in strict LIFO order, so compute closes before main even though
     // they co-exit at the same step.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -1160,6 +1229,7 @@ fn test_nested_calls_test_via_ct_print_full() {
             "outer".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -1171,11 +1241,25 @@ fn test_nested_calls_test_via_ct_print_full() {
     //   outer(1)     = 111 → d → outer=111
     // compute's tail tuple's last named slot is `d=111`; main
     // delegates to compute.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -1246,6 +1330,9 @@ fn test_nested_calls_test_lifo_call_exit_order() {
     // now closes before main (strict LIFO), correcting the previous
     // main-before-compute ordering that violated the call-tree
     // invariant.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -1254,6 +1341,7 @@ fn test_nested_calls_test_lifo_call_exit_order() {
             "outer".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 }
@@ -1270,11 +1358,25 @@ fn test_nested_calls_test_call_exit_returns_real_values() {
     ) else {
         return;
     };
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let returns: Vec<i64> = doc["events"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| e["return_value"]["i"].as_i64().expect("Int.i"))
         .collect();
     assert_eq!(returns, vec![3, 11, 111, 111, 111]);
@@ -1311,14 +1413,23 @@ fn test_collections_test_via_ct_print_full() {
         .collect();
     // Function table follows DFS visit order (bug-fix 1+2): main →
     // compute → array_total (called first in compute) → pair_sum.
-    assert_eq!(bare_fns, vec!["main", "compute", "array_total", "pair_sum"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "compute", "array_total", "pair_sum"]
+    );
 
     // ----- counts -----------------------------------------------------
     // 20 steps: array_total(8) + pair_sum(4) + compute(5) + main(2)
     // + 1 trailing.  4 calls, 0 io_events.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(20), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1330,15 +1441,22 @@ fn test_collections_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 20 steps + 4 call_entry + 4 call_exit + 16 value records
     // = 44 events.
-    assert_eq!(events.len(), 28, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 30, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → array_total
     // → pair_sum.  Bug-fix 1+2 (LIFO exit) and bug-fix 3 (real
     // returns) drive the per-callee return values surfaced below.
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "array_total".to_string(),
@@ -1350,6 +1468,9 @@ fn test_collections_test_via_ct_print_full() {
     // column-aware writer now flushes completed CallRecords in strict
     // LIFO order (compute before main), restoring the canonical call-
     // tree closing semantics.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -1357,17 +1478,32 @@ fn test_collections_test_via_ct_print_full() {
             "pair_sum".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
     // Bug-fix 3: array_total returns 4 (Array<felt252>::len), pair_sum
     // returns 30 (10 + 20), compute's tail tuple's last named slot is
     // `final_sum=34`, main delegates.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -1552,13 +1688,19 @@ fn test_error_paths_test_via_ct_print_full() {
         .collect();
     // Function table follows DFS visit order (bug-fix 1+2): main →
     // compute → divide.
-    assert_eq!(bare_fns, vec!["main", "compute", "divide"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "compute", "divide"]);
 
     // ----- counts -----------------------------------------------------
     // 10 steps + 3 calls + 1 io_event (the panic).
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -1570,13 +1712,20 @@ fn test_error_paths_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 3 call_entry + 3 call_exit + 1 io + 6 value
     // records = 23 events.
-    assert_eq!(events.len(), 17, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 19, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // Bug-fix 1+2: dynamic call order is main → compute → divide.
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "divide".to_string(),
@@ -1589,12 +1738,16 @@ fn test_error_paths_test_via_ct_print_full() {
     // (exit_step ASC, call_key DESC) so callee-before-caller is
     // preserved even when the panic-teardown close() drain places
     // both at the same step index.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "divide".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -1723,7 +1876,10 @@ fn test_struct_test_via_ct_print_full() {
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
     // Function table: DFS visit order from main.
-    assert_eq!(bare_fns, vec!["main", "compute"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "compute"]);
 
     // ----- Type table — the per-struct lang_type must appear ----------
     // The recorder lazily registers a `Struct`-kinded type with a
@@ -1749,7 +1905,10 @@ fn test_struct_test_via_ct_print_full() {
     // 8 steps: main(2) + compute(5) + 1 trailing return_value step.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1761,19 +1920,36 @@ fn test_struct_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 14, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "compute".to_string()
+        ]
     );
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — compute closes before main.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec![
+            "compute".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -1831,11 +2007,25 @@ fn test_struct_test_via_ct_print_full() {
     // ----- Per-callee return values (bug-fix 3 carryover) -------------
     // compute() returns total = 3+4+10+20 = 37.  main() delegates so
     // surfaces 37 as well.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -1899,13 +2089,19 @@ fn test_result_option_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "compute"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "compute"]);
 
     // ----- counts -----------------------------------------------------
     // main(2) + compute(8) + 1 trailing = 11 step events; 2 calls.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -1917,18 +2113,35 @@ fn test_result_option_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 11 steps + 2 call_entry + 2 call_exit + 9 value records
     // = 24 events.
-    assert_eq!(events.len(), 15, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 17, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "compute".to_string()
+        ]
     );
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — compute closes before main.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec![
+            "compute".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // ----- Decoded value kinds ---------------------------------------
@@ -2008,12 +2221,21 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "compute", "require_positive"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "compute", "require_positive"]
+    );
 
     // ----- counts -----------------------------------------------------
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(1),
@@ -2023,9 +2245,13 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
     let events = doc["events"].as_array().expect("events array");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "require_positive".to_string(),
@@ -2037,12 +2263,16 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
     // exits by (exit_step ASC, call_key DESC) so callee-before-caller
     // is preserved even when the panic-teardown close() drain places
     // both at the same step index.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "require_positive".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -2124,9 +2354,12 @@ fn test_loop_while_for_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         bare_fns,
-        vec!["main", "compute", "loop_three", "loop_double"]
+        vec!["<toplevel>", "main", "compute", "loop_three", "loop_double"]
     );
 
     // ----- counts -----------------------------------------------------
@@ -2147,7 +2380,10 @@ fn test_loop_while_for_test_via_ct_print_full() {
     // Total: 14 + 11 + 5 + 2 + 1 = 33.
     let counts = &doc["counts"];
     assert_eq!(counts["steps"].as_u64(), Some(33), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2159,13 +2395,20 @@ fn test_loop_while_for_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 33 steps + 4 call_entry + 4 call_exit + 11 value records
     // = 52 events.
-    assert_eq!(events.len(), 41, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 43, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence + entry-key flush exit ----------------------
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "loop_three".to_string(),
@@ -2177,6 +2420,9 @@ fn test_loop_while_for_test_via_ct_print_full() {
     // emitter sorts shared-step exits by (exit_step ASC, call_key
     // DESC) so callee-before-caller is preserved even when the
     // close() drain places both at the same step index.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -2184,6 +2430,7 @@ fn test_loop_while_for_test_via_ct_print_full() {
             "loop_double".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -2508,13 +2755,19 @@ fn test_destructuring_test_via_ct_print_full() {
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
     // DFS visit order from main.
-    assert_eq!(bare_fns, vec!["main", "use_pair"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "use_pair"]);
 
     let counts = &doc["counts"];
     // 8 step events: implicit start(1) + main(2) + use_pair(4) +
     // trailing return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2526,18 +2779,35 @@ fn test_destructuring_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 14, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "use_pair".to_string()]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "use_pair".to_string()
+        ]
     );
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — use_pair closes before main.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["use_pair".to_string(), "main".to_string()]
+        vec![
+            "use_pair".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // Per-binding kind sequence — `pair` is a Tuple, the destructured
@@ -2582,11 +2852,25 @@ fn test_destructuring_test_via_ct_print_full() {
 
     // Per-callee return values: use_pair returns x + y = 30; main
     // delegates.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = doc["events"]
         .as_array()
         .expect("events array")
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -2646,7 +2930,13 @@ fn test_snapshot_ref_test_via_ct_print_full() {
         .collect();
     // DFS visit order: main → compute → read_only (called first in
     // compute) → scale.
-    assert_eq!(bare_fns, vec!["main", "compute", "read_only", "scale"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "compute", "read_only", "scale"]
+    );
 
     // Type table: felt252 (scalar), Point{x,y} (struct), Ref
     // (snapshot/ref carrier), type_0 (writer-side default felt id used
@@ -2657,13 +2947,22 @@ fn test_snapshot_ref_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "Point{x,y}", "Ref", "type_0"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252", "Point{x,y}", "Ref"]);
 
     let counts = &doc["counts"];
     // 16 step events: implicit start(1) + main(2) + compute(7) +
     // read_only(2) + scale(3) + trailing return_value(1).
     assert_eq!(counts["steps"].as_u64(), Some(16), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2675,12 +2974,19 @@ fn test_snapshot_ref_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 16 steps + 4 call_entry + 4 call_exit + 12 value records
     // = 36 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 26, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "compute".to_string(),
             "read_only".to_string(),
@@ -2689,6 +2995,9 @@ fn test_snapshot_ref_test_via_ct_print_full() {
     );
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — compute closes before main.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -2696,6 +3005,7 @@ fn test_snapshot_ref_test_via_ct_print_full() {
             "scale".to_string(),
             "compute".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -2802,7 +3112,10 @@ fn test_numeric_widths_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "use_widths"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "use_widths"]);
 
     // Every recognised width must appear in the trace's type table —
     // that's the M10 round-2 width pin: a regression to the shared
@@ -2813,32 +3126,27 @@ fn test_numeric_widths_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
     assert_eq!(
         types,
         vec![
             "felt252",
             "u8",
-            "type_1",
             "u16",
-            "type_3",
             "u32",
-            "type_5",
             "u64",
-            "type_7",
             "u128",
-            "type_9",
             "i8",
-            "type_11",
             "i16",
-            "type_13",
             "i32",
-            "type_15",
             "i64",
-            "type_17",
             "i128",
-            "type_19",
             "u256{low,high}",
-            "type_0",
         ]
     );
 
@@ -2873,16 +3181,14 @@ fn test_numeric_widths_test_via_ct_print_full() {
     let lookup_width_type = |name: &str| -> String {
         let value = find_var_value(&doc, name).expect("var present");
         let type_id = value["type_id"].as_u64().expect("type_id u64") as usize;
-        // The Nim writer interleaves the user-registered lang_type
-        // with auto-generated `type_<id>` aliases — the recorder's
-        // user-supplied lang_type lives at `type_id - 1` (the writer
-        // emits the user lang_type entry, then assigns the user-facing
-        // type_id one slot later as an alias).  This is a stable
-        // property of the writer's id assignment; if it changes, this
-        // helper needs an update — but the underlying lang_type still
-        // appears in the types array (asserted above).
+        // A value's `type_id` is its record's position in the `types.dat`
+        // interning table, so it indexes the table directly.  There is no
+        // alias slot to step over: a `type_<id>` name minted for an id that
+        // was never registered is a fabrication, not a table entry
+        // (conformance-testing.md, §"The shapes" — "A placeholder that
+        // looks like data").
         types
-            .get(type_id - 1)
+            .get(type_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| panic!("type_id {} out of range", type_id))
     };
@@ -2971,13 +3277,19 @@ fn test_array_operations_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "use_array"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "use_array"]);
 
     let counts = &doc["counts"];
     // Step events: implicit start(1) + main(2) + use_array(4) +
     // trailing return_value(1) = 8.
     assert_eq!(counts["steps"].as_u64(), Some(8), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -2989,7 +3301,10 @@ fn test_array_operations_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 8 steps + 2 call_entry + 2 call_exit + 6 value records =
     // 18 events.
-    assert_eq!(events.len(), 12, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 14, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Per-binding kind sequence ----------------------------------
@@ -3041,9 +3356,23 @@ fn test_array_operations_test_via_ct_print_full() {
 
     // ----- Per-callee return values: use_array returns 2; main
     //       delegates.
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").  It is pinned here and excluded from the Int-valued
+    // sequence below rather than the sequence being loosened to admit it.
+    let root_exit = doc["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "call_exit")
+        .expect("at least one call_exit");
+    assert_eq!(root_exit["function"].as_str(), Some("<toplevel>"));
+    assert_eq!(root_exit["return_value"]["kind"].as_str(), Some("Void"));
     let exit_returns: Vec<(String, i64)> = events
         .iter()
-        .filter(|e| e["kind"] == "call_exit")
+        .filter(|e| e["kind"] == "call_exit" && e["function"] != "<toplevel>")
         .map(|e| {
             let name = e["function"]
                 .as_str()
@@ -3280,7 +3609,10 @@ fn test_generic_function_test_via_ct_print_full() {
         .collect();
     // DFS visit order: main → pick_u32 → pick_u64.  `min` is inlined
     // by the Sierra optimiser, so it never surfaces as its own frame.
-    assert_eq!(bare_fns, vec!["main", "pick_u32", "pick_u64"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "pick_u32", "pick_u64"]);
 
     // Type table — felt252 (the writer's default scalar carrier),
     // followed by the dedicated u32 / u64 type ids the recorder
@@ -3294,14 +3626,23 @@ fn test_generic_function_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "u32", "type_1", "u64", "type_3"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252", "u32", "u64"]);
 
     let counts = &doc["counts"];
     // 16 step events: implicit start(1) + main(2 body lines: 33,34 +
     // 35 + 36) + pick_u32(4 body lines: 19,20,21,22) + pick_u64(4
     // body lines: 26,27,28,29) + main resume(2: 35,36) + trailing(1).
     assert_eq!(counts["steps"].as_u64(), Some(16), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3313,23 +3654,34 @@ fn test_generic_function_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 16 steps + 3 call_entry + 3 call_exit + 12 value records
     // = 34 events.
-    assert_eq!(events.len(), 22, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "pick_u32".to_string(),
             "pick_u64".to_string(),
         ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "pick_u32".to_string(),
             "pick_u64".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -3370,13 +3722,18 @@ fn test_generic_function_test_via_ct_print_full() {
             (name, id)
         })
         .collect();
+    // The ids are the `types.dat` interning-table indices: felt252 = 0,
+    // u32 = 1, u64 = 2.  There are no interleaved `type_<id>` entries to
+    // step over — a placeholder minted for an unregistered id is a
+    // fabrication, not a table entry (conformance-testing.md, §"The
+    // shapes" — "A placeholder that looks like data").
     assert_eq!(
         lo_hi_emissions,
         vec![
+            ("lo".to_string(), 1),
+            ("hi".to_string(), 1),
             ("lo".to_string(), 2),
             ("hi".to_string(), 2),
-            ("lo".to_string(), 4),
-            ("hi".to_string(), 4),
         ]
     );
 
@@ -3459,9 +3816,13 @@ fn test_trait_impl_test_via_ct_print_full() {
             }
         })
         .collect();
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         bare_fns,
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "drive".to_string(),
             "HelloImpl::greet".to_string(),
@@ -3475,7 +3836,10 @@ fn test_trait_impl_test_via_ct_print_full() {
     // 26,27 — `}` skipped) + HiImpl::greet(2: 33,34 — `}` skipped) +
     // main trailing(1: 49) + recorder trailing-step(1).  14 total.
     assert_eq!(counts["steps"].as_u64(), Some(14), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3487,7 +3851,10 @@ fn test_trait_impl_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 14 steps + 4 call_entry + 4 call_exit + 11 value records
     // = 33 events.
-    assert_eq!(events.len(), 22, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 24, "events.len()");
     assert_step_indices_monotonic(&doc);
 
     // ----- Call sequence & exit ordering ------------------------------
@@ -3507,9 +3874,13 @@ fn test_trait_impl_test_via_ct_print_full() {
             }
         })
         .collect();
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         bare_call_seq,
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "drive".to_string(),
             "HelloImpl::greet".to_string(),
@@ -3530,6 +3901,9 @@ fn test_trait_impl_test_via_ct_print_full() {
             }
         })
         .collect();
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         bare_exit_seq,
         vec![
@@ -3537,6 +3911,7 @@ fn test_trait_impl_test_via_ct_print_full() {
             "HiImpl::greet".to_string(),
             "drive".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -3578,6 +3953,7 @@ fn test_trait_impl_test_via_ct_print_full() {
             ("HiImpl::greet".to_string(), "Void".to_string()),
             ("drive".to_string(), "Void".to_string()),
             ("main".to_string(), "Void".to_string()),
+            ("<toplevel>".to_string(), "Void".to_string()),
         ]
     );
 }
@@ -3622,7 +3998,10 @@ fn test_span_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "sum_span"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "sum_span"]);
 
     // Type table — felt252, the shared Array<felt252> id, the new
     // Span<felt252> id (M10 round-3), the per-width u32 id, and the
@@ -3633,16 +4012,15 @@ fn test_span_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
     assert_eq!(
         types,
-        vec![
-            "felt252",
-            "Array<felt252>",
-            "Span<felt252>",
-            "u32",
-            "type_3",
-            "type_0",
-        ]
+        vec!["felt252", "Array<felt252>", "Span<felt252>", "u32"]
     );
 
     let counts = &doc["counts"];
@@ -3653,7 +4031,10 @@ fn test_span_test_via_ct_print_full() {
     // main trailing(1: 35) + recorder trailing(1) + extras from the
     // simulator's per-iteration re-emissions.
     assert_eq!(counts["steps"].as_u64(), Some(20), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3665,16 +4046,33 @@ fn test_span_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 20 steps + 2 call_entry + 2 call_exit + 7 value records
     // = 31 events.
-    assert_eq!(events.len(), 24, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 26, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "sum_span".to_string()]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "sum_span".to_string()
+        ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["sum_span".to_string(), "main".to_string()]
+        vec![
+            "sum_span".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // ----- Per-binding kind sequence ---------------------------------
@@ -3778,14 +4176,20 @@ fn test_match_pattern_test_via_ct_print_full() {
         .iter()
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
-    assert_eq!(bare_fns, vec!["main", "run_all", "classify"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "run_all", "classify"]);
 
     let counts = &doc["counts"];
     // Step events: implicit start(1) + main(2: 47,48) + run_all(7:
     // 37,38,39,40,41,42,43,44) + classify(7: 27,28,29,30,31,32,33) +
     // main trailing(1: 49) + recorder trailing(1) = 19.
     assert_eq!(counts["steps"].as_u64(), Some(19), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -3797,23 +4201,34 @@ fn test_match_pattern_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 19 steps + 3 call_entry + 3 call_exit + 15 value records
     // = 40 events.
-    assert_eq!(events.len(), 25, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 27, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "run_all".to_string(),
             "classify".to_string(),
         ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "classify".to_string(),
             "run_all".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -3874,6 +4289,7 @@ fn test_match_pattern_test_via_ct_print_full() {
             ("classify".to_string(), "Void".to_string()),
             ("run_all".to_string(), "Void".to_string()),
             ("main".to_string(), "Void".to_string()),
+            ("<toplevel>".to_string(), "Void".to_string()),
         ]
     );
 }
@@ -3992,7 +4408,13 @@ fn test_syscalls_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "Address", "u64", "type_2"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252", "Address", "u64"]);
 
     // ----- Per-syscall return-value shape ----------------------------
     // Strict pin: each call_exit carries the syscall's return value
@@ -4010,7 +4432,7 @@ fn test_syscalls_test_via_ct_print_full() {
             )
         })
         .collect();
-    assert_eq!(exit_returns.len(), 3, "expected 3 call_exit events");
+    assert_eq!(exit_returns.len(), 4, "expected 4 call_exit events");
     assert_eq!(exit_returns[0].0, "0xfeed::get_caller_address");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Raw"));
     assert_eq!(
@@ -4028,6 +4450,13 @@ fn test_syscalls_test_via_ct_print_full() {
         exit_returns[2].1["r"].as_str(),
         Some("0x00000000000000000000000000000000000000000000000000000000feedface")
     );
+
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[3].0, "<toplevel>");
+    assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
 }
 
 // ===========================================================================
@@ -4078,7 +4507,13 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
         .map(|f| f.rsplit("::").next().unwrap())
         .collect();
     // DFS visit order from main: main → make_greeting → make_tag.
-    assert_eq!(bare_fns, vec!["main", "make_greeting", "make_tag"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "make_greeting", "make_tag"]
+    );
 
     // Type table: only the shared felt252 carrier and its writer-side
     // alias — neither ByteArray nor short-string add new lang_types
@@ -4090,14 +4525,23 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "type_0"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252"]);
 
     let counts = &doc["counts"];
     // 9 step events: implicit start(1) + main body steps(2: 31, 34) +
     // make_greeting body(2: 32, 23) + make_tag body(2: 33, 27) +
     // main resume(1: 34) + trailing return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(9), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4109,23 +4553,34 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 9 steps + 3 call_entry + 3 call_exit + 5 value records =
     // 20 events.
-    assert_eq!(events.len(), 15, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 17, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "make_greeting".to_string(),
             "make_tag".to_string(),
         ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "make_greeting".to_string(),
             "make_tag".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -4186,7 +4641,7 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns.len(), 4);
     assert_eq!(exit_returns[0].0, "make_greeting");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[1].0, "make_tag");
@@ -4195,6 +4650,12 @@ fn test_byte_array_short_string_test_via_ct_print_full() {
     assert_eq!(exit_returns[2].0, "main");
     assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[2].1["i"].as_i64(), Some(91_621_724_999_499));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[3].0, "<toplevel>");
+    assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
 }
 
 // --- felt252_dict_test.cairo ----------------------------------------------
@@ -4236,7 +4697,10 @@ fn test_felt252_dict_test_via_ct_print_full() {
     // DFS visit order from main: main → use_dict.  The corelib
     // Felt252DictTrait::{insert,get} dispatch is inlined by the
     // Sierra optimiser, so neither surfaces as its own frame.
-    assert_eq!(bare_fns, vec!["main", "use_dict"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "use_dict"]);
 
     // Type table: only the shared felt252 carrier and its writer-side
     // alias — Felt252Dict's typed inner state isn't surfaced yet.
@@ -4246,13 +4710,22 @@ fn test_felt252_dict_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "type_0"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252"]);
 
     let counts = &doc["counts"];
     // 10 step events: implicit start(1) + main body(2: 34, 36) +
     // use_dict body(6: 35, 26-30) + trailing return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4264,16 +4737,33 @@ fn test_felt252_dict_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 2 call_entry + 2 call_exit + 7 value records
     // = 21 events.
-    assert_eq!(events.len(), 14, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 16, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "use_dict".to_string(),]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "use_dict".to_string()
+        ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["use_dict".to_string(), "main".to_string(),]
+        vec![
+            "use_dict".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // Per-binding kind sequence: only the `v` u32 binding (the typed
@@ -4315,12 +4805,18 @@ fn test_felt252_dict_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    assert_eq!(exit_returns.len(), 2);
+    assert_eq!(exit_returns.len(), 3);
     assert_eq!(exit_returns[0].0, "use_dict");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[0].1["i"].as_i64(), Some(100));
     assert_eq!(exit_returns[1].0, "main");
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[2].0, "<toplevel>");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
 }
 
 // --- hash_builtins_test.cairo ---------------------------------------------
@@ -4364,7 +4860,13 @@ fn test_hash_builtins_test_via_ct_print_full() {
     // DFS visit order from main: main → use_pedersen → use_poseidon.
     // The corelib pedersen / hades_permutation dispatch is inlined by
     // the Sierra optimiser, so neither surfaces as its own frame.
-    assert_eq!(bare_fns, vec!["main", "use_pedersen", "use_poseidon"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "use_pedersen", "use_poseidon"]
+    );
 
     // Type table: only the shared felt252 carrier and its writer-side
     // alias — neither pedersen output (felt252) nor hades_permutation
@@ -4375,7 +4877,13 @@ fn test_hash_builtins_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "type_0"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252"]);
 
     let counts = &doc["counts"];
     // 11 step events: implicit start(1) + main body(3: 51, 52, 53) +
@@ -4383,7 +4891,10 @@ fn test_hash_builtins_test_via_ct_print_full() {
     // main resume(2: 48 + trailing return_value step at 54) =
     // 1+3+2+2+1+2 = 11.
     assert_eq!(counts["steps"].as_u64(), Some(11), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4395,23 +4906,34 @@ fn test_hash_builtins_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 11 steps + 3 call_entry + 3 call_exit + 7 value records
     // = 24 events.
-    assert_eq!(events.len(), 17, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 19, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "use_pedersen".to_string(),
             "use_poseidon".to_string(),
         ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "use_pedersen".to_string(),
             "use_poseidon".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -4461,7 +4983,7 @@ fn test_hash_builtins_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns.len(), 4);
     assert_eq!(exit_returns[0].0, "use_pedersen");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
@@ -4469,6 +4991,12 @@ fn test_hash_builtins_test_via_ct_print_full() {
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[2].0, "main");
     assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[3].0, "<toplevel>");
+    assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
 }
 
 // --- visibility_decorators_test (StarkNet trace) --------------------------
@@ -4918,7 +5446,13 @@ fn test_closure_test_via_ct_print_full() {
     // The closure bodies and the corelib `Fn::call` dispatch are
     // inlined by the Sierra optimiser, so neither surfaces as its
     // own frame.
-    assert_eq!(bare_fns, vec!["main", "no_capture", "with_capture"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "no_capture", "with_capture"]
+    );
 
     // Type table: only the shared felt252 carrier — closures don't
     // introduce a new typed surface today (the Fn-trait shape is
@@ -4937,7 +5471,10 @@ fn test_closure_test_via_ct_print_full() {
     // no_capture body(3: 49, 37, 38) + with_capture body(4: 50, 42,
     // 43, 44) + trailing return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(12), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -4949,23 +5486,34 @@ fn test_closure_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 12 steps + 3 call_entry + 3 call_exit + 8 value records
     // = 26 events.
-    assert_eq!(events.len(), 18, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 20, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "no_capture".to_string(),
             "with_capture".to_string(),
         ]
     );
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
             "no_capture".to_string(),
             "with_capture".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -5000,13 +5548,19 @@ fn test_closure_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    assert_eq!(exit_returns.len(), 3);
+    assert_eq!(exit_returns.len(), 4);
     assert_eq!(exit_returns[0].0, "no_capture");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[1].0, "with_capture");
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[2].0, "main");
     assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[3].0, "<toplevel>");
+    assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
 }
 
 // --- interface_dispatcher_test (StarkNet trace) ---------------------------
@@ -5398,7 +5952,10 @@ fn test_implicits_test_via_ct_print_full() {
     // / `Felt252Dict::insert` / `Felt252Dict::get` corelib dispatch
     // is inlined by the Sierra optimiser, so neither surfaces as
     // its own frame — and neither do the implicit-arg threads.
-    assert_eq!(bare_fns, vec!["main", "compute"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(bare_fns, vec!["<toplevel>", "main", "compute"]);
 
     // Type table: shared felt252 carrier and its writer-side alias —
     // the implicit args (Pedersen / RangeCheck / SegmentArena /
@@ -5410,14 +5967,23 @@ fn test_implicits_test_via_ct_print_full() {
         .iter()
         .filter_map(|v| v.as_str())
         .collect();
-    assert_eq!(types, vec!["felt252", "type_0"]);
+    // No `type_<id>` entry: a placeholder name minted for an id that was
+    // never registered is a fabrication, and pinning it makes the
+    // fabrication a requirement (conformance-testing.md, §"The shapes" —
+    // "A placeholder that looks like data"; §"What this asks of a
+    // conformance suite" #4 "Refuse rather than default").  The table is
+    // exactly the types the recorder registered.
+    assert_eq!(types, vec!["felt252"]);
 
     let counts = &doc["counts"];
     // 10 step events: implicit start(1) + main body(2: 44, 45) +
     // compute body(6: 35, 36, 37, 38, 39, 40) + trailing
     // return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(10), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(2), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(3), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -5429,18 +5995,35 @@ fn test_implicits_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 10 steps + 2 call_entry + 2 call_exit + 8 value records
     // = 22 events.
-    assert_eq!(events.len(), 14, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 16, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
-        vec!["main".to_string(), "compute".to_string()]
+        vec![
+            "<toplevel>".to_string(),
+            "main".to_string(),
+            "compute".to_string()
+        ]
     );
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — compute closes before main.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
-        vec!["compute".to_string(), "main".to_string()]
+        vec![
+            "compute".to_string(),
+            "main".to_string(),
+            "<toplevel>".to_string()
+        ]
     );
 
     // Per-binding kind sequence: only the `h` Pedersen binding (Int)
@@ -5482,13 +6065,19 @@ fn test_implicits_test_via_ct_print_full() {
         .collect();
     // Re-pinned after M-cairo column-aware emission landed: strict
     // LIFO flush order — compute closes before main.
-    assert_eq!(exit_returns.len(), 2);
+    assert_eq!(exit_returns.len(), 3);
     assert_eq!(exit_returns[0].0, "compute");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[0].1["i"].as_i64(), Some(0));
     assert_eq!(exit_returns[1].0, "main");
     assert_eq!(exit_returns[1].1["kind"].as_str(), Some("Int"));
     assert_eq!(exit_returns[1].1["i"].as_i64(), Some(0));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[2].0, "<toplevel>");
+    assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
 }
 
 // --- cairo_test_attribute_test.cairo --------------------------------------
@@ -5526,7 +6115,13 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     // DFS visit order from main: main → add_test → sub_test →
     // mul_test.  Each `#[test]`-shaped helper surfaces as its own
     // function frame.
-    assert_eq!(bare_fns, vec!["main", "add_test", "sub_test", "mul_test"]);
+    // `<toplevel>` heads the table: it is the call tree's root, which
+    // `start` registers before any function the recorder declares
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(
+        bare_fns,
+        vec!["<toplevel>", "main", "add_test", "sub_test", "mul_test"]
+    );
 
     // Type table: only the shared felt252 carrier — every helper
     // returns a felt252 and no composite types are constructed.
@@ -5544,7 +6139,10 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     // 34, 35, 36) + mul_test body(4: 49, 40, 41, 42) + trailing
     // return_value step(1).
     assert_eq!(counts["steps"].as_u64(), Some(18), "steps; counts={counts}");
-    assert_eq!(counts["calls"].as_u64(), Some(4), "calls; counts={counts}");
+    // The `<toplevel>` frame counts as a call: `start` opens it at depth 0
+    // as the call tree's root, before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(counts["calls"].as_u64(), Some(5), "calls; counts={counts}");
     assert_eq!(
         counts["io_events"].as_u64(),
         Some(0),
@@ -5556,12 +6154,19 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     // stream now includes value records as separate entries, so the
     // shape is 18 steps + 4 call_entry + 4 call_exit + 13 value records
     // = 39 events.
-    assert_eq!(events.len(), 26, "events.len()");
+    // One of the call frames is `<toplevel>`, the call tree's root that
+    // `start` opens at depth 0 and the recorder closes on exit
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
+    assert_eq!(events.len(), 28, "events.len()");
     assert_step_indices_monotonic(&doc);
 
+    // `<toplevel>` opens first: it is the call tree's root, which `start`
+    // opens at depth 0 before any call the recorder makes
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_call_sequence(&doc),
         vec![
+            "<toplevel>".to_string(),
             "main".to_string(),
             "add_test".to_string(),
             "sub_test".to_string(),
@@ -5570,6 +6175,9 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     );
     // LIFO close: each helper closes before the next opens (callees
     // don't nest), and main closes last after all three helpers.
+    // `<toplevel>` closes last: it is the call tree's root, which `start`
+    // opens at depth 0, so every other frame unwinds inside it
+    // (trace-events.md, "Recorder Integration — Starting a Recording").
     assert_eq!(
         observed_exit_sequence(&doc),
         vec![
@@ -5577,6 +6185,7 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
             "sub_test".to_string(),
             "mul_test".to_string(),
             "main".to_string(),
+            "<toplevel>".to_string(),
         ]
     );
 
@@ -5611,7 +6220,7 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
             (name, e["return_value"].clone())
         })
         .collect();
-    assert_eq!(exit_returns.len(), 4);
+    assert_eq!(exit_returns.len(), 5);
     assert_eq!(exit_returns[0].0, "add_test");
     assert_eq!(exit_returns[0].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[1].0, "sub_test");
@@ -5620,4 +6229,10 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
     assert_eq!(exit_returns[2].1["kind"].as_str(), Some("Void"));
     assert_eq!(exit_returns[3].0, "main");
     assert_eq!(exit_returns[3].1["kind"].as_str(), Some("Void"));
+    // The call tree's root exits last and returns nothing: `start` opens
+    // `<toplevel>` at depth 0 with no arguments, so it has no value to
+    // return (trace-events.md, "Recorder Integration — Starting a
+    // Recording").
+    assert_eq!(exit_returns[4].0, "<toplevel>");
+    assert_eq!(exit_returns[4].1["kind"].as_str(), Some("Void"));
 }
