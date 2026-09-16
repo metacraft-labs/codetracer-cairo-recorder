@@ -73,8 +73,7 @@ ct-print --json <recording-dir>/<program>.ct
 `ct-print` accepts `--json`, `--json-events`, `--summary`, and
 `--follow` modes; see its `--help` for details. This conversion path
 is the canonical way to produce textual oracles for golden-snapshot
-tests, debugging, and interop with non-CodeTracer tools — see
-`Recorder-CLI-Conventions.md` §4 in the `codetracer-specs` repo.
+tests, debugging, and interop with non-CodeTracer tools.
 
 ### Architecture
 
