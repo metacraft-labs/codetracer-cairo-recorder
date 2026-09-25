@@ -81,6 +81,7 @@
 
 import os
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 
 ## Cairo corelib provisioning.
@@ -143,6 +144,9 @@ package codetracer_cairo_recorder:
     name: "codetracer-cairo-recorder"
 
   devEnv:
+    when not defined(windows):
+      useFlakeDevShell()
+
     activity "default"
 
   build:
