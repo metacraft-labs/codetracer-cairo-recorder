@@ -64,7 +64,7 @@ prepare-ci:
   echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "${GITHUB_ENV:-/dev/null}"
 
 # --- M13: Packaging UX Standardization ---
-# These recipes implement Repo-Requirements.md §2.8. The OS-packaged
+# These recipes implement Repo-Requirements.md §2.5. The OS-packaged
 # recorders share a uniform packaging surface: `bump-version` rewrites
 # Cargo.toml + packaging/recorder-metadata.yml; `build-package` shells
 # out to packaging/build-all.sh with the requested channel selector;
