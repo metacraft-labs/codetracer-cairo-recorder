@@ -8,3 +8,4 @@ pub mod recorder;
 pub mod source_map;
 pub mod starknet;
 pub mod tracer;
+pub mod value_probe;
