@@ -32,6 +32,14 @@
             # contract visible in flake.nix.
             pkgs.nim
             pkgs.nimble
+            # `git` from nixpkgs, ahead of the host's. On macOS the host's
+            # `/usr/bin/git` is an xcode-select trampoline that runs
+            # `$DEVELOPER_DIR/usr/bin/xcrun`; in this shell DEVELOPER_DIR is the
+            # nixpkgs apple-sdk, whose xcrun (xcbuild) prints "warning: unhandled
+            # Platform key FamilyDisplayName" on every call. nimble reads git's
+            # stderr together with its stdout, so with that git `nimble install` would
+            # reject `git rev-parse HEAD` as "not a valid sha1 hash value".
+            pkgs.git
             pkgs.just
             pkgs.capnproto
             pkgs.rustc
