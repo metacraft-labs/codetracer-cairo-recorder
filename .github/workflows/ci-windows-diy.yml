@@ -58,7 +58,7 @@ jobs:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}
           siblings: |
-            codetracer
+            codetracer=ffb8b8d9eec4408f3eab44a13ee31c0f3eb2ba93
             codetracer-trace-format
             codetracer-trace-format-nim
 

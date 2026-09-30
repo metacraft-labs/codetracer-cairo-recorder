@@ -1,33 +1,7 @@
-# WHY EVERY ENTRY BELOW CARRIES AN EXPLICIT `=<40-hex sha>`
-#
-# `clone-siblings` resolves a BARE entry from the workspace lock, and raises
-# NEED_LOCK for it -- which makes a missing lock FATAL. No lock is published
-# for this repo's branch tip, so every reprobuild run died in `clone-siblings`
-# with:
-#
-#     ::error::No workspace lock for codetracer-cairo-recorder (candidates: ...). Neither a
-#     repo-workspaces locks/<project>/codetracer-cairo-recorder/<sha>.xml nor a reprobuild
-#     locks/<project>/codetracer-cairo-recorder/<sha>.toml exists in
-#     metacraft-labs/metacraft-manifests@latest.
-#
-# before a single dependency was provisioned. With no bare entry left, nothing
-# needs a revision FROM the lock, so `lock_unavailable()` degrades to a
-# `::warning::` and the clones proceed.
-#
-# Each SHA below is a revision this repo's `just lint` / `just test` were run
-# and passed against locally (the sibling's `dev` tip at the time), so CI
-# builds the recorder against the trace format it was verified with. Move a
-# pin only together with a local run against the new revision.
-#
-# THIS IS THE FALLBACK, NOT THE GOAL. `clone-siblings.sh` prescribes it in
-# that order: (1) declare these repos in codetracer-cairo-recorder's project manifest in
-# metacraft-labs/metacraft-manifests so the lock pins them for every future
-# commit with nothing to maintain; (2) only where (1) is impossible, name a
-# 40-hex commit SHA here -- a commit, never a branch, because a branch tip is
-# exactly the unpinned resolve the mechanism exists to prevent. Delete these
-# `=<sha>` suffixes as soon as (1) lands.
-#
-# Cross-repo siblings cloned by setup-dev-env at the explicit SHAs
-# pinned below (see codetracer-specs/Testing/Cross-Repo-CI-Integration.md).
-codetracer-trace-format=c884aae7e195e3fa1ef8080d0e45c56e22fedca6  # codetracer-trace-format@dev, 2026-09-30
-codetracer-trace-format-nim=d88c0cd460e98df607976fed818c456d9dfb3c9e  # codetracer-trace-format-nim@dev, 2026-09-30
+# Cross-repo siblings cloned by setup-dev-env (clone-siblings), each at the
+# revision this commit's committed repro.lock pins for it -- the develop-set
+# siblings `repro lock refresh` records from the workspace manifest's
+# `depends` edges. To move a pin, check the sibling out at the new revision,
+# run `repro lock refresh` and commit repro.lock. Do not add `=<ref>` here.
+codetracer-trace-format
+codetracer-trace-format-nim
