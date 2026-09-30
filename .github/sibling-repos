@@ -14,9 +14,10 @@
 # needs a revision FROM the lock, so `lock_unavailable()` degrades to a
 # `::warning::` and the clones proceed.
 #
-# Each SHA below is the tip of the ref that sibling's own repository actually
-# uses as its default branch, verified to exist with `git ls-remote` (the refs
-# are NOT uniformly `main` -- see the `@<branch>` note on each line).
+# Each SHA below is a revision this repo's `just lint` / `just test` were run
+# and passed against locally (the sibling's `dev` tip at the time), so CI
+# builds the recorder against the trace format it was verified with. Move a
+# pin only together with a local run against the new revision.
 #
 # THIS IS THE FALLBACK, NOT THE GOAL. `clone-siblings.sh` prescribes it in
 # that order: (1) declare these repos in codetracer-cairo-recorder's project manifest in
@@ -28,5 +29,5 @@
 #
 # Cross-repo siblings cloned by setup-dev-env at the explicit SHAs
 # pinned below (see codetracer-specs/Testing/Cross-Repo-CI-Integration.md).
-codetracer-trace-format=54ef5d649623be7c4cb9ef2357b90f79694ddbed  # codetracer-trace-format@stable tip
-codetracer-trace-format-nim=3fcd1666da3e21638dcd9716376b9ce126fcac8b  # codetracer-trace-format-nim@dev tip
+codetracer-trace-format=c884aae7e195e3fa1ef8080d0e45c56e22fedca6  # codetracer-trace-format@dev, 2026-09-30
+codetracer-trace-format-nim=d88c0cd460e98df607976fed818c456d9dfb3c9e  # codetracer-trace-format-nim@dev, 2026-09-30
