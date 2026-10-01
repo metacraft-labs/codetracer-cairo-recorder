@@ -33,25 +33,25 @@ format:
 fmt: format
 
 # Recorder-specific CI preparation, run by the shared reusable-recorder-ci
-# workflow (nixos-modules) after setup-dev-env and before lint/test. Builds the
-# Nim trace-writer sibling library + ct-print, and fetches the Cairo corelib
+# workflow (nixos-modules) after setup-dev-env and before lint/test. Builds
+# ct-print from the Nim trace-format sibling, and fetches the Cairo corelib
 # pinned in Cargo.toml. Exports the paths tests need to $GITHUB_ENV when running
 # under GitHub Actions (a no-op file otherwise). Shebang recipe so the shell
 # state persists across the steps.
-# TODO: fold the corelib + sibling lib into the flake devShell so local dev and
+# The trace writer's C ABI archive is NOT built here: the
+# codetracer_trace_writer_nim crate's build script compiles and links it with
+# the flags the library requires (one process heap, --threads:off).
+# TODO: fold the corelib + ct-print into the flake devShell so local dev and
 # CI share one path (per cross-repo-builds.md); then this recipe shrinks.
 prepare-ci:
   #!/usr/bin/env bash
   set -euo pipefail
-  # Build the Nim trace-writer sibling static lib + ct-print (Layout-A decode).
+  # Build ct-print (Layout-A decode) from the Nim trace-format sibling.
   (
     cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
     nimble install -y stew results
-    nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
-      -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
     nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
   )
-  echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "${GITHUB_ENV:-/dev/null}"
   # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
   # $CAIRO_CORELIB_DIR).
   CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
