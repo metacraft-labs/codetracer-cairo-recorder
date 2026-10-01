@@ -13,6 +13,7 @@ build-release:
 test:
   cargo test --locked
   bash tests/verify-cli-convention-no-silent-skip.sh
+  bash tests/test-fetch-cairo-corelib.sh
 
 t: test
 
@@ -53,15 +54,8 @@ prepare-ci:
     nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
   )
   # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
-  # $CAIRO_CORELIB_DIR).
-  CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-  curl -fsSL \
-    "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
-    -o cairo-src.tar.gz
-  tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
-  mv "cairo-${CAIRO_VERSION}/corelib" corelib
-  rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
-  echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "${GITHUB_ENV:-/dev/null}"
+  # $CAIRO_CORELIB_DIR). Re-runnable; see the script.
+  bash scripts/fetch-cairo-corelib.sh
 
 # --- M13: Packaging UX Standardization ---
 # These recipes implement Repo-Requirements.md §2.5. The OS-packaged
