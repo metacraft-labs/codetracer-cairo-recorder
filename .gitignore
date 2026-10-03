@@ -5,3 +5,6 @@
 
 # reprobuild build artifacts
 .repro/
+
+# Owning Repro Cairo corelib extraction output (pinned from Cargo.toml).
+/build/cairo-corelib/
