@@ -1682,7 +1682,7 @@ fn test_collections_test_value_kinds_present() {
 /// panic.  The recorder catches the `RunResultValue::Panic` outcome
 /// and surfaces it via `register_special_event(EventLogKind::Error,
 /// "CairoPanic", ...)`, so we expect exactly one `io_event` of kind
-/// `ioError` containing the panic payload.
+/// `Error` containing the panic payload.
 ///
 /// Bug-fix 4 lock-in: source-level let-bindings whose RHS is a
 /// statically-evaluable literal (`let a: felt252 = 10;`) keep their
@@ -1800,8 +1800,8 @@ fn test_error_paths_test_via_ct_print_full() {
     let panic_ev = io_events[0];
     assert_eq!(
         panic_ev["io_kind"].as_str(),
-        Some("ioError"),
-        "panic event must be tagged ioError; got {panic_ev}"
+        Some("Error"),
+        "panic event must be tagged Error; got {panic_ev}"
     );
     let text = panic_ev["text"].as_str().expect("io.text str");
     assert!(
@@ -2224,7 +2224,7 @@ fn test_result_option_test_via_ct_print_full() {
 /// This test pins:
 ///
 /// * the function table (DFS order from main).
-/// * the io_event count + tag (one `ioError`).
+/// * the io_event count + tag (one `Error`).
 /// * the literal substring `value was zero` inside the panic event's
 ///   `text` (the felt-decoded message).
 #[test]
@@ -2310,8 +2310,8 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
     let panic_ev = io_events[0];
     assert_eq!(
         panic_ev["io_kind"].as_str(),
-        Some("ioError"),
-        "panic event must be tagged ioError; got {panic_ev}"
+        Some("Error"),
+        "panic event must be tagged Error; got {panic_ev}"
     );
     let text = panic_ev["text"].as_str().expect("io.text str");
     assert!(
@@ -2721,10 +2721,8 @@ fn test_storage_test_via_ct_print_full() {
             (io_kind, text)
         })
         .collect();
-    // The multi-stream Nim writer collapses the wider EventLogKind enum
-    // down to a 3-way IOEventKind: `EventLogKind::Read` → `ioFileOp` and
-    // `EventLogKind::Write` → `ioStdout` (see `toIOEventKind` in
-    // codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim).
+    // Each io_event's `io_kind` is the exact EventLogKind the recorder
+    // wrote: `Read` or `Write`.
     // The discriminator that downstream consumers actually rely on lives
     // in the `text` field, where our recorder embeds the
     // `<contract>:<key>=<value(s)>` payload.  Pin both the kind tag (so a
@@ -2732,18 +2730,18 @@ fn test_storage_test_via_ct_print_full() {
     // payload (so a regression in the recorder's content format fails
     // here rather than at the consumer).
     assert!(
-        io_pairs[0].0 == "ioFileOp" && io_pairs[0].1.contains("0xcafe:value=0"),
-        "first io_event should be a Read (ioFileOp) of value=0; got {:?}",
+        io_pairs[0].0 == "Read" && io_pairs[0].1.contains("0xcafe:value=0"),
+        "first io_event should be a Read of value=0; got {:?}",
         io_pairs[0]
     );
     assert!(
-        io_pairs[1].0 == "ioStdout" && io_pairs[1].1.contains("0xcafe:value=0->7"),
-        "second io_event should be a Write (ioStdout) of value 0->7; got {:?}",
+        io_pairs[1].0 == "Write" && io_pairs[1].1.contains("0xcafe:value=0->7"),
+        "second io_event should be a Write of value 0->7; got {:?}",
         io_pairs[1]
     );
     assert!(
-        io_pairs[2].0 == "ioFileOp" && io_pairs[2].1.contains("0xcafe:value=7"),
-        "third io_event should be a Read (ioFileOp) of value=7; got {:?}",
+        io_pairs[2].0 == "Read" && io_pairs[2].1.contains("0xcafe:value=7"),
+        "third io_event should be a Read of value=7; got {:?}",
         io_pairs[2]
     );
 }
@@ -3538,8 +3536,8 @@ fn test_event_test_via_ct_print_full() {
     assert_eq!(events.len(), 8, "events.len()");
 
     // ----- io_event sequence -----------------------------------------
-    // The event emits as `EventLogKind::EvmEvent`, which the
-    // multi-stream writer maps to `ioStderr`.  The text field carries
+    // The event emits as `EventLogKind::EvmEvent`, which is the
+    // surfaced `io_kind`.  The text field carries
     // both the canonical `StarknetEvent:<contract>` tag (so consumers
     // can dispatch on it) and the structured `keys=[...] data=[...]`
     // payload — `keys` holds the indexed (`#[key]`) fields, `data`
@@ -3555,9 +3553,8 @@ fn test_event_test_via_ct_print_full() {
     let ev = io_events[0];
     assert_eq!(
         ev["io_kind"].as_str(),
-        Some("ioStderr"),
-        "StarkNet event must surface as ioStderr (multi-stream writer's \
-         tag for EvmEvent); got {ev}"
+        Some("EvmEvent"),
+        "StarkNet event must surface as EvmEvent; got {ev}"
     );
     let text = ev["text"].as_str().expect("io.text str");
     // Strict-shape pin: the exact text format combines the
@@ -5427,11 +5424,11 @@ fn test_component_test_via_ct_print_full() {
         io_pairs,
         vec![
             (
-                "ioFileOp".to_string(),
+                "Read".to_string(),
                 "0xc0de:ownable_component::owner=0xa11ce".to_string(),
             ),
             (
-                "ioStdout".to_string(),
+                "Write".to_string(),
                 "0xc0de:ownable_component::owner=0xa11ce->0xb0b".to_string(),
             ),
         ]
