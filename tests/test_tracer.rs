@@ -791,6 +791,25 @@ fn find_var_value<'a>(doc: &'a serde_json::Value, target: &str) -> Option<&'a se
     None
 }
 
+/// Every `(name, i64)` pair of the step variables that decode as
+/// `Int`, in emission order; non-Int values are skipped.
+fn observed_int_values(doc: &serde_json::Value) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for ev in doc["events"].as_array().expect("events array") {
+        if ev["kind"] != "step" {
+            continue;
+        }
+        for v in ev["vars"].as_array().into_iter().flatten() {
+            if v["value"]["kind"] == "Int" {
+                let name = v["varname"].as_str().expect("varname str").to_string();
+                let i = v["value"]["i"].as_i64().expect("Int.i must be i64");
+                out.push((name, i));
+            }
+        }
+    }
+    out
+}
+
 /// Decode the call-entry sequence as a vector of bare function names
 /// (last `::` segment).  The Cairo recorder fully-qualifies functions
 /// as `<crate>::<crate>::<name>`; the bare-name view keeps assertions
@@ -1078,6 +1097,7 @@ fn test_control_flow_test_via_ct_print_full() {
             ("raw".to_string(), 2),
             ("sign".to_string(), 20),
             ("loop_total".to_string(), 3),
+            ("total".to_string(), 0),
             ("i".to_string(), 0),
             ("picked".to_string(), 100),
             ("combined".to_string(), 123),
@@ -1560,6 +1580,7 @@ fn test_collections_test_via_ct_print_full() {
         vec![
             ("arr_total".to_string(), "Int".to_string()),
             ("arr".to_string(), "Sequence".to_string()),
+            ("len".to_string(), "Int".to_string()),
             ("pair_total".to_string(), "Int".to_string()),
             ("pair".to_string(), "Tuple".to_string()),
             ("x".to_string(), "Int".to_string()),
@@ -1567,6 +1588,11 @@ fn test_collections_test_via_ct_print_full() {
             ("final_sum".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
+    );
+    // `len = arr.len()` of the four-element array.
+    assert_eq!(
+        find_var_value(&doc, "len").and_then(|v| v["i"].as_i64()),
+        Some(4)
     );
 
     // Strict-shape assertions for the compound values.  Element ordering
@@ -1612,6 +1638,7 @@ fn test_collections_test_via_ct_print_full() {
         scalar_only,
         vec![
             ("arr_total".to_string(), 4),
+            ("len".to_string(), 4),
             ("pair_total".to_string(), 30),
             ("x".to_string(), 10),
             ("y".to_string(), 20),
@@ -1655,7 +1682,7 @@ fn test_collections_test_value_kinds_present() {
 /// panic.  The recorder catches the `RunResultValue::Panic` outcome
 /// and surfaces it via `register_special_event(EventLogKind::Error,
 /// "CairoPanic", ...)`, so we expect exactly one `io_event` of kind
-/// `ioError` containing the panic payload.
+/// `Error` containing the panic payload.
 ///
 /// Bug-fix 4 lock-in: source-level let-bindings whose RHS is a
 /// statically-evaluable literal (`let a: felt252 = 10;`) keep their
@@ -1773,8 +1800,8 @@ fn test_error_paths_test_via_ct_print_full() {
     let panic_ev = io_events[0];
     assert_eq!(
         panic_ev["io_kind"].as_str(),
-        Some("ioError"),
-        "panic event must be tagged ioError; got {panic_ev}"
+        Some("Error"),
+        "panic event must be tagged Error; got {panic_ev}"
     );
     let text = panic_ev["text"].as_str().expect("io.text str");
     assert!(
@@ -2197,7 +2224,7 @@ fn test_result_option_test_via_ct_print_full() {
 /// This test pins:
 ///
 /// * the function table (DFS order from main).
-/// * the io_event count + tag (one `ioError`).
+/// * the io_event count + tag (one `Error`).
 /// * the literal substring `value was zero` inside the panic event's
 ///   `text` (the felt-decoded message).
 #[test]
@@ -2283,8 +2310,8 @@ fn test_panic_with_felt252_test_via_ct_print_full() {
     let panic_ev = io_events[0];
     assert_eq!(
         panic_ev["io_kind"].as_str(),
-        Some("ioError"),
-        "panic event must be tagged ioError; got {panic_ev}"
+        Some("Error"),
+        "panic event must be tagged Error; got {panic_ev}"
     );
     let text = panic_ev["text"].as_str().expect("io.text str");
     assert!(
@@ -2471,6 +2498,8 @@ fn test_loop_while_for_test_via_ct_print_full() {
     assert_eq!(
         var_seq,
         vec![
+            ("a".to_string(), 3),
+            ("acc".to_string(), 0),
             ("i".to_string(), 0),
             ("acc".to_string(), 1),
             ("i".to_string(), 1),
@@ -2478,11 +2507,14 @@ fn test_loop_while_for_test_via_ct_print_full() {
             ("i".to_string(), 2),
             ("acc".to_string(), 3),
             ("i".to_string(), 3),
+            ("b".to_string(), 20),
+            ("acc".to_string(), 0),
             ("i".to_string(), 0),
             ("acc".to_string(), 10),
             ("i".to_string(), 1),
             ("acc".to_string(), 20),
             ("i".to_string(), 2),
+            ("total".to_string(), 23),
         ]
     );
 }
@@ -2689,10 +2721,8 @@ fn test_storage_test_via_ct_print_full() {
             (io_kind, text)
         })
         .collect();
-    // The multi-stream Nim writer collapses the wider EventLogKind enum
-    // down to a 3-way IOEventKind: `EventLogKind::Read` → `ioFileOp` and
-    // `EventLogKind::Write` → `ioStdout` (see `toIOEventKind` in
-    // codetracer-trace-format-nim/src/codetracer_trace_writer_ffi.nim).
+    // The canonical decoder preserves the original Read and Write enum
+    // labels, alongside the recorder's exact storage payloads.
     // The discriminator that downstream consumers actually rely on lives
     // in the `text` field, where our recorder embeds the
     // `<contract>:<key>=<value(s)>` payload.  Pin both the kind tag (so a
@@ -2700,18 +2730,18 @@ fn test_storage_test_via_ct_print_full() {
     // payload (so a regression in the recorder's content format fails
     // here rather than at the consumer).
     assert!(
-        io_pairs[0].0 == "ioFileOp" && io_pairs[0].1.contains("0xcafe:value=0"),
-        "first io_event should be a Read (ioFileOp) of value=0; got {:?}",
+        io_pairs[0].0 == "Read" && io_pairs[0].1.contains("0xcafe:value=0"),
+        "first io_event should be a Read of value=0; got {:?}",
         io_pairs[0]
     );
     assert!(
-        io_pairs[1].0 == "ioStdout" && io_pairs[1].1.contains("0xcafe:value=0->7"),
-        "second io_event should be a Write (ioStdout) of value 0->7; got {:?}",
+        io_pairs[1].0 == "Write" && io_pairs[1].1.contains("0xcafe:value=0->7"),
+        "second io_event should be a Write of value 0->7; got {:?}",
         io_pairs[1]
     );
     assert!(
-        io_pairs[2].0 == "ioFileOp" && io_pairs[2].1.contains("0xcafe:value=7"),
-        "third io_event should be a Read (ioFileOp) of value=7; got {:?}",
+        io_pairs[2].0 == "Read" && io_pairs[2].1.contains("0xcafe:value=7"),
+        "third io_event should be a Read of value=7; got {:?}",
         io_pairs[2]
     );
 }
@@ -3016,9 +3046,11 @@ fn test_snapshot_ref_test_via_ct_print_full() {
         observed_var_kinds(&doc),
         vec![
             ("origin".to_string(), "Struct".to_string()),
+            ("snap_total".to_string(), "Int".to_string()),
             ("p".to_string(), "Reference".to_string()),
             ("shift".to_string(), "Struct".to_string()),
             ("p".to_string(), "Reference".to_string()),
+            ("scaled_total".to_string(), "Int".to_string()),
             ("total".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
@@ -3077,7 +3109,12 @@ fn test_snapshot_ref_test_via_ct_print_full() {
     let scalar_only = observed_var_sequence_filtered(&doc, &["origin", "shift", "p"]);
     assert_eq!(
         scalar_only,
-        vec![("total".to_string(), 67), ("return_value".to_string(), 67),]
+        vec![
+            ("snap_total".to_string(), 7),
+            ("scaled_total".to_string(), 60),
+            ("total".to_string(), 67),
+            ("return_value".to_string(), 67),
+        ]
     );
 }
 
@@ -3168,8 +3205,14 @@ fn test_numeric_widths_test_via_ct_print_full() {
             ("s128".to_string(), "Int".to_string()),
             ("u_big".to_string(), "Struct".to_string()),
             ("total".to_string(), "Int".to_string()),
+            ("_keep_u256".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
+    );
+    // `_keep_u256 = u_big.low + u_big.high` with `u_big = 0`.
+    assert_eq!(
+        find_var_value(&doc, "_keep_u256").and_then(|v| v["i"].as_i64()),
+        Some(0)
     );
 
     // ----- Per-width Int values ---------------------------------------
@@ -3493,8 +3536,8 @@ fn test_event_test_via_ct_print_full() {
     assert_eq!(events.len(), 8, "events.len()");
 
     // ----- io_event sequence -----------------------------------------
-    // The event emits as `EventLogKind::EvmEvent`, which the
-    // multi-stream writer maps to `ioStderr`.  The text field carries
+    // The canonical decoder preserves `EventLogKind::EvmEvent`.
+    // The text field carries
     // both the canonical `StarknetEvent:<contract>` tag (so consumers
     // can dispatch on it) and the structured `keys=[...] data=[...]`
     // payload — `keys` holds the indexed (`#[key]`) fields, `data`
@@ -3510,9 +3553,8 @@ fn test_event_test_via_ct_print_full() {
     let ev = io_events[0];
     assert_eq!(
         ev["io_kind"].as_str(),
-        Some("ioStderr"),
-        "StarkNet event must surface as ioStderr (multi-stream writer's \
-         tag for EvmEvent); got {ev}"
+        Some("EvmEvent"),
+        "StarkNet event must retain canonical EvmEvent; got {ev}"
     );
     let text = ev["text"].as_str().expect("io.text str");
     // Strict-shape pin: the exact text format combines the
@@ -3694,10 +3736,30 @@ fn test_generic_function_test_via_ct_print_full() {
     assert_eq!(
         observed_var_kinds(&doc),
         vec![
+            ("f".to_string(), "Int".to_string()),
             ("lo".to_string(), "Int".to_string()),
             ("hi".to_string(), "Int".to_string()),
+            ("r".to_string(), "Int".to_string()),
+            ("g".to_string(), "Int".to_string()),
             ("lo".to_string(), "Int".to_string()),
             ("hi".to_string(), "Int".to_string()),
+            ("r".to_string(), "Int".to_string()),
+            ("total".to_string(), "Int".to_string()),
+        ]
+    );
+    // `r = min(lo, hi)` per instantiation; `total = f + g`.
+    assert_eq!(
+        observed_int_values(&doc),
+        vec![
+            ("f".to_string(), 5),
+            ("lo".to_string(), 5),
+            ("hi".to_string(), 7),
+            ("r".to_string(), 5),
+            ("g".to_string(), 11),
+            ("lo".to_string(), 11),
+            ("hi".to_string(), 13),
+            ("r".to_string(), 11),
+            ("total".to_string(), 16),
         ]
     );
 
@@ -4086,12 +4148,18 @@ fn test_span_test_via_ct_print_full() {
         vec![
             ("xs".to_string(), "Sequence".to_string()),
             ("view".to_string(), "Sequence".to_string()),
+            ("r".to_string(), "Int".to_string()),
             ("total".to_string(), "Int".to_string()),
             ("i".to_string(), "Int".to_string()),
             ("i".to_string(), "Int".to_string()),
             ("i".to_string(), "Int".to_string()),
             ("i".to_string(), "Int".to_string()),
         ]
+    );
+    // `r = sum_span(view)` over the span of [10, 20, 30].
+    assert_eq!(
+        find_var_value(&doc, "r").and_then(|v| v["i"].as_i64()),
+        Some(60)
     );
 
     // ----- Strict shape for the Array literal `xs` -------------------
@@ -4242,11 +4310,26 @@ fn test_match_pattern_test_via_ct_print_full() {
     //     through.
     //   * `err_val  = Result::Err(99)`            — single-level
     //     integer payload, surfaces as a Variant.
-    // No other `let`-bindings on this fixture's path produce step
-    // variable rows under the existing recorder heuristics.
+    // The scalar results of `classify` surface with the values the
+    // program computed: main's `total` and run_all's `a`/`b`/`c`.
+    assert_eq!(
+        observed_int_values(&doc),
+        vec![
+            ("total".to_string(), 307),
+            ("a".to_string(), 7),
+            ("b".to_string(), 100),
+            ("c".to_string(), 200),
+        ]
+    );
     assert_eq!(
         observed_var_kinds(&doc),
-        vec![("err_val".to_string(), "Variant".to_string())]
+        vec![
+            ("total".to_string(), "Int".to_string()),
+            ("err_val".to_string(), "Variant".to_string()),
+            ("a".to_string(), "Int".to_string()),
+            ("b".to_string(), "Int".to_string()),
+            ("c".to_string(), "Int".to_string()),
+        ]
     );
 
     // ----- Strict variant-shape assertion ----------------------------
@@ -4766,14 +4849,23 @@ fn test_felt252_dict_test_via_ct_print_full() {
         ]
     );
 
-    // Per-binding kind sequence: only the `v` u32 binding (the typed
-    // dict.get('alice') return) surfaces.  The dict literal itself
+    // Per-binding kind sequence: main's `r` and the `v` u32 binding
+    // (the typed dict.get('alice') return) surface.  The dict literal itself
     // (`d`), the inserted values (100, 200), and the
     // SquashedFelt252Dict snapshot are *not* surfaced — pinning the
     // gap so a future dict-state recorder lands as a new entry.
     assert_eq!(
         observed_var_kinds(&doc),
-        vec![("v".to_string(), "Int".to_string()),]
+        vec![
+            ("r".to_string(), "Int".to_string()),
+            ("v".to_string(), "Int".to_string()),
+        ]
+    );
+    // `v` holds what `d.get('alice')` returned and `r` what `use_dict`
+    // returned to main.
+    assert_eq!(
+        observed_int_values(&doc),
+        vec![("r".to_string(), 100), ("v".to_string(), 100)]
     );
 
     // The `v` binding decodes to 100 — the value the driver inserted
@@ -5332,11 +5424,11 @@ fn test_component_test_via_ct_print_full() {
         io_pairs,
         vec![
             (
-                "ioFileOp".to_string(),
+                "Read".to_string(),
                 "0xc0de:ownable_component::owner=0xa11ce".to_string(),
             ),
             (
-                "ioStdout".to_string(),
+                "Write".to_string(),
                 "0xc0de:ownable_component::owner=0xa11ce->0xb0b".to_string(),
             ),
         ]
@@ -5517,14 +5609,17 @@ fn test_closure_test_via_ct_print_full() {
         ]
     );
 
-    // Per-binding kind sequence: today the recorder's source-level
-    // heuristic does not see through the closure inliner to the
-    // `let a = no_capture()` / `let bias = 32` / `let b =
-    // with_capture()` bindings, so step-level vars are empty.  Pin
-    // the empty kind list so a future closure-aware extension lands
-    // as a new test variable rather than silently changing the
-    // contract.
-    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+    // Per-binding values: main's `a`/`b` carry the closure drivers'
+    // results and `with_capture`'s captured `bias` surfaces in its frame.
+    assert_eq!(
+        observed_int_values(&doc),
+        vec![
+            ("a".to_string(), 42),
+            ("b".to_string(), 42),
+            ("bias".to_string(), 32),
+        ]
+    );
+    assert_eq!(observed_var_kinds(&doc).len(), 3, "only Int locals");
 
     // Per-callee call_exit return values: every closure-driver
     // returns Void today because the closure call is inlined and the
@@ -6026,20 +6121,26 @@ fn test_implicits_test_via_ct_print_full() {
         ]
     );
 
-    // Per-binding kind sequence: only the `h` Pedersen binding (Int)
-    // and the trailing `return_value` (Int) — the `widened` u32
-    // binding and the `_v` discard binding don't surface because
-    // the recorder's source-level heuristic drops `_`-prefixed
-    // discards and the u32 widening is inlined by the optimiser.
-    // Pin the kinds list explicitly so a future implicit-aware
-    // extension lands as a new entry rather than silently changing
-    // the contract.
+    // Per-binding kind sequence: the `h` Pedersen binding, the
+    // `widened` u32 product, the `_v` dict read and the trailing
+    // `return_value`, all Int.
     assert_eq!(
         observed_var_kinds(&doc),
         vec![
             ("h".to_string(), "Int".to_string()),
+            ("widened".to_string(), "Int".to_string()),
+            ("_v".to_string(), "Int".to_string()),
             ("return_value".to_string(), "Int".to_string()),
         ]
+    );
+    // `widened = 7 * 2`; `_v` reads back the `widened` stored under 'seed'.
+    assert_eq!(
+        find_var_value(&doc, "widened").and_then(|v| v["i"].as_i64()),
+        Some(14)
+    );
+    assert_eq!(
+        find_var_value(&doc, "_v").and_then(|v| v["i"].as_i64()),
+        Some(14)
     );
 
     // Per-callee call_exit return values: both `compute` and `main`
@@ -6189,16 +6290,24 @@ fn test_cairo_test_attribute_test_via_ct_print_full() {
         ]
     );
 
-    // Per-binding kind sequence: today the recorder's source-level
-    // heuristic does not surface the `let s = add_test()` /
-    // `let d = sub_test()` / `let m = mul_test()` bindings as
-    // step variables (the synthetic test helpers' return values
-    // are not fed back into `var_values` because their return
-    // expression `a + b` is not a let-binding the heuristic sees).
-    // Pin the empty kind list so a future cairo-test-aware
-    // extension lands as a new test variable rather than silently
-    // changing the contract.
-    assert_eq!(observed_var_kinds(&doc), Vec::<(String, String)>::new());
+    // Per-binding values: main's `s`/`d`/`m` carry the helpers'
+    // results and each helper's `a`/`b` locals surface inside its
+    // own frame, in execution order.
+    assert_eq!(
+        observed_int_values(&doc),
+        vec![
+            ("s".to_string(), 3),
+            ("a".to_string(), 1),
+            ("b".to_string(), 2),
+            ("d".to_string(), 4),
+            ("a".to_string(), 5),
+            ("b".to_string(), 1),
+            ("m".to_string(), 18),
+            ("a".to_string(), 3),
+            ("b".to_string(), 6),
+        ]
+    );
+    assert_eq!(observed_var_kinds(&doc).len(), 9, "only Int locals");
 
     // Per-callee call_exit return values: every helper returns Void
     // today because the recorder's source-level let-binding

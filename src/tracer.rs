@@ -23,6 +23,7 @@ use cairo_lang_sierra::program::Program as SierraProgram;
 use cairo_lang_utils::ordered_hash_map::OrderedHashMap;
 
 use crate::source_map::SourceMap;
+use crate::value_probe::{observe_locals, ObservedLocals};
 
 /// The main tracer struct that captures Cairo execution traces.
 pub struct CairoTracer {
@@ -45,6 +46,9 @@ pub struct CairoTracer {
     /// ValueRecord itself; the type id only needs to mark "this is a
     /// tagged-union value".
     variant_type_id: Option<codetracer_trace_types::TypeId>,
+    /// Runtime values of the source's named locals, read from an
+    /// unoptimised run of the same program (see [`crate::value_probe`]).
+    observed_locals: ObservedLocals,
 }
 
 impl CairoTracer {
@@ -88,7 +92,7 @@ impl CairoTracer {
             .build()
             .map_err(|e| eyre!("Failed to build database: {e}"))?;
 
-        init_dev_corelib(&mut db, corelib_path);
+        init_dev_corelib(&mut db, corelib_path.clone());
 
         let main_crate_ids = setup_project(&mut db, source_path)
             .map_err(|e| eyre!("Failed to setup project: {e}"))?;
@@ -105,6 +109,18 @@ impl CairoTracer {
             sierra_program.funcs.len(),
             sierra_program.statements.len()
         );
+
+        // -- 1b. Observe the runtime values of the named locals ----------------------
+        // The optimised build above folds and inlines locals away; an
+        // unoptimised run of the same source recovers the value each
+        // named local held.  Failure here only loses those values.
+        let observed_locals = match observe_locals(source_path, &corelib_path) {
+            Ok(observed) => observed,
+            Err(err) => {
+                eprintln!("[codetracer-cairo-recorder] local values unavailable: {err}");
+                ObservedLocals::default()
+            }
+        };
 
         // -- 2. Build source map for line mapping -------------------------------------
         let source_map = SourceMap::from_source(source_path, source_code);
@@ -215,6 +231,7 @@ impl CairoTracer {
             tuple_type_id: None,
             struct_type_ids: std::collections::HashMap::new(),
             variant_type_id: None,
+            observed_locals,
         };
 
         // -- 6. Initialise output files -----------------------------------------------
@@ -754,19 +771,40 @@ impl CairoTracer {
             // on this line.  Values originate from `var_values`, which
             // is populated from the VM's success result and (on panic)
             // from statically-evaluated literal initialisers.
+            // Values observed in the executed program take precedence;
+            // the VM's success result covers the rest.  Bindings that
+            // surface below with a richer value (compound, destructured,
+            // width-typed) are left to those emitters.
             for (name, line) in binding_names {
-                if *line == abs_line {
-                    if let Some(&val) = var_values.get(name) {
-                        let value = ValueRecord::Int {
-                            i: val,
-                            type_id: felt_type_id,
-                        };
-                        TraceWriter::register_variable_with_full_value(
-                            &mut *self.writer,
-                            name,
-                            value,
-                        );
-                    }
+                if *line != abs_line {
+                    continue;
+                }
+                let local = name.trim_start_matches("mut ").trim();
+                let richer = typed_int_bindings
+                    .iter()
+                    .any(|t| t.line == abs_line && t.name == local)
+                    || compound_bindings
+                        .iter()
+                        .any(|c| c.emit_line == abs_line && c.name == local);
+                let observed = if richer {
+                    None
+                } else {
+                    self.observed_locals.get(local, abs_line)
+                };
+                let emitted = match observed {
+                    Some(val) => Some((local, val)),
+                    None => var_values.get(name).map(|&val| (name.as_str(), val)),
+                };
+                if let Some((var_name, val)) = emitted {
+                    let value = ValueRecord::Int {
+                        i: val,
+                        type_id: felt_type_id,
+                    };
+                    TraceWriter::register_variable_with_full_value(
+                        &mut *self.writer,
+                        var_name,
+                        value,
+                    );
                 }
             }
 

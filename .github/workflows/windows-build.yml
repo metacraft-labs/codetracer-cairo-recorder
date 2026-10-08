@@ -3,6 +3,7 @@ on:
   push:
     branches: [main, dev, stable]
   pull_request:
+    branches-ignore: [agents]
 
 # Cancel superseded PR runs only: a new push to a PR makes its previous run
 # moot, and stale runs otherwise hold scarce self-hosted runners. Every other
@@ -32,6 +33,24 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Select exclusive job-owned Windows DIY root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $temp = Get-Item -LiteralPath $env:RUNNER_TEMP
+          if (-not $temp.PSIsContainer -or ($temp.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "RUNNER_TEMP must be an existing direct directory"
+          }
+          $root = Join-Path $temp.FullName ("cairo-diy-" + [Guid]::NewGuid().ToString("N"))
+          $owned = New-Item -ItemType Directory -Path $root
+          if (-not $owned.PSIsContainer -or ($owned.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The exclusive Windows DIY root is not a direct directory"
+          }
+          if ($owned.FullName.Contains("`n") -or $owned.FullName.Contains("`r")) {
+            throw "Windows DIY root cannot contain a line break"
+          }
+          "WINDOWS_DIY_INSTALL_ROOT=$($owned.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Setup dev env
         # setup-dev-env clones the listed siblings at the
         # workspace-lock-pinned revisions and installs `dev-exec`, which
@@ -44,6 +63,7 @@ jobs:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}
           siblings: |
+            codetracer
             codetracer-trace-format
             codetracer-trace-format-nim
 

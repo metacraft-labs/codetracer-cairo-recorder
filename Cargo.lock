@@ -1082,14 +1082,17 @@ dependencies = [
 name = "codetracer-cairo-recorder"
 version = "0.1.0"
 dependencies = [
+ "cairo-lang-casm",
  "cairo-lang-compiler",
  "cairo-lang-defs",
  "cairo-lang-diagnostics",
  "cairo-lang-filesystem",
  "cairo-lang-lowering",
+ "cairo-lang-runnable-utils",
  "cairo-lang-runner",
  "cairo-lang-semantic",
  "cairo-lang-sierra",
+ "cairo-lang-sierra-generator",
  "cairo-lang-sierra-to-casm",
  "cairo-lang-starknet",
  "cairo-lang-starknet-classes",

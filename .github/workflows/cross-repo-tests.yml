@@ -166,10 +166,12 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/../codetracer-vscode-extension"
           MCL_PATH="$GITHUB_WORKSPACE/../nix-blockchain-development"
-          # Replace recorder_exec to bypass direnv (which can't propagate
+          # Override only recorder_exec; retain every other declared helper.
+          # Use the existing local-flake route (direnv can't propagate
           # GitHub auth to the NixOS Nix daemon) and use --override-input
           # to resolve mcl-blockchain from the local clone.
-          cat > scripts/recorder-shell-exec.sh << HEREDOC
+          test -f scripts/recorder-shell-exec.sh
+          cat >> scripts/recorder-shell-exec.sh << HEREDOC
           #!/usr/bin/env bash
           recorder_exec() {
             local repo_dir="\$1"
