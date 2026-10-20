@@ -794,16 +794,19 @@ fn trace_block(
         out_dir.join("block.json"),
         serde_json::to_string_pretty(&block_report)?,
     )?;
+    let diff_word = if block_diff.get("notMeasured").is_some() {
+        "not measured"
+    } else if block_diff["storageEntries"]["matches"] == json!(true)
+        && block_diff["nonces"]["matches"] == json!(true)
+        && block_diff["classHashes"]["matches"] == json!(true)
+    {
+        "MATCH"
+    } else {
+        "DIFF"
+    };
     println!(
-        "block {number}: {replayed}/{} reproduced, {recorded} recorded, block state diff {}, {} ms",
+        "block {number}: {replayed}/{} reproduced, {recorded} recorded, block state diff {diff_word}, {} ms",
         blk.txs.len(),
-        if block_diff["storageEntries"]["matches"] == json!(true)
-            && block_diff["nonces"]["matches"] == json!(true)
-        {
-            "MATCH"
-        } else {
-            "DIFF"
-        },
         started.elapsed().as_millis()
     );
     for r in &tx_reports {
