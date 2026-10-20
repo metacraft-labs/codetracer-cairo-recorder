@@ -14,12 +14,36 @@ use std::path::{Path, PathBuf};
 use blockifier::execution::bt_trace::Frame;
 use codetracer_trace_types::{EventLogKind, Line, TypeKind, ValueRecord, NONE_VALUE};
 use codetracer_trace_writer_nim::trace_writer::TraceWriter;
-use codetracer_trace_writer_nim::{create_trace_writer, TraceEventsFileFormat};
+use codetracer_trace_writer_nim::{NimTraceWriter, TraceEventsFileFormat};
 use eyre::{eyre, Result};
 use starknet_api::core::ClassHash;
 use starknet_types_core::felt::Felt;
 
 use crate::listing::{abi_names, Listing};
+
+/// A valid UUIDv7 (RFC 9562) that is a function of the transaction alone: the 48-bit
+/// time field is the block timestamp in milliseconds (so ids still sort by when the
+/// transaction ran) and the 74 "random" bits are the leading bits of the transaction
+/// hash. The same derivation as codetracer-evm-recorder's `derived_recording_id`.
+pub fn derived_recording_id(block_timestamp_secs: u64, tx_hash: &Felt) -> String {
+    let ms = block_timestamp_secs.saturating_mul(1000) & 0xFFFF_FFFF_FFFF;
+    let h = tx_hash.to_bytes_be();
+    let mut b = [0u8; 16];
+    b[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    b[6] = 0x70 | (h[0] & 0x0f);
+    b[7] = h[1];
+    b[8] = 0x80 | (h[2] & 0x3f);
+    b[9..].copy_from_slice(&h[3..10]);
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
+}
 
 /// The events one frame emitted, as `(keys, data)`, in emission order.
 pub type FrameEvents = Vec<(Vec<Felt>, Vec<Felt>)>;
@@ -56,6 +80,8 @@ fn seq(
 
 pub struct Context<'a> {
     pub listings: &'a HashMap<ClassHash, Listing>,
+    /// The path each class's listing is INTERNED under: `./sources/<class_hash>.casm`,
+    /// relative to the capture directory, so a container names no work directory.
     pub paths: &'a HashMap<ClassHash, PathBuf>,
     pub abis: &'a HashMap<ClassHash, serde_json::Value>,
 }
@@ -63,13 +89,22 @@ pub struct Context<'a> {
 #[allow(clippy::too_many_arguments)]
 pub fn write_container(
     program_label: &str,
+    recording_id: &str,
     out_dir: &Path,
     frames: &[Frame],
     events_by_frame: &BTreeMap<usize, FrameEvents>,
     revert_error: Option<&str>,
     cx: &Context,
 ) -> Result<Recorded> {
-    let mut writer = create_trace_writer(program_label, &[], TraceEventsFileFormat::Ctfs);
+    // A recording id that is a function of the execution, so two runs over the same
+    // inputs write the same bytes — what a producer publishing the container at an
+    // input-derived URL, and a build checking it was produced rather than stored, need.
+    // The setter is on the Nim writer, not on the trait, so the concrete writer is
+    // built here; `create_trace_writer` builds the same one for `Ctfs`.
+    let mut nim = NimTraceWriter::new(program_label, &[], TraceEventsFileFormat::Ctfs);
+    nim.set_recording_id(recording_id)
+        .map_err(|e| eyre!("the writer refused recording id {recording_id}: {e}"))?;
+    let mut writer: Box<dyn TraceWriter> = Box::new(nim);
     let w = &mut *writer;
     TraceWriter::begin_writing_trace_events(w, &out_dir.join("trace.json"))
         .map_err(|e| eyre!("{e}"))?;
@@ -79,8 +114,11 @@ pub fn write_container(
     for f in frames {
         if registered.insert(f.class_hash) {
             let path = &cx.paths[&f.class_hash];
-            let text = std::fs::read_to_string(path)?;
-            let lens: Vec<u32> = text.lines().map(|l| l.len() as u32).collect();
+            let lens: Vec<u32> = cx.listings[&f.class_hash]
+                .text
+                .lines()
+                .map(|l| l.len() as u32)
+                .collect();
             TraceWriter::register_path_with_line_lengths(w, path, &lens)
                 .map_err(|e| eyre!("{e}"))?;
         }

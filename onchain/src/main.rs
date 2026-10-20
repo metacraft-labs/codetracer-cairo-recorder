@@ -10,7 +10,10 @@
 //! with the node's own.
 //!
 //! THE TRACE: cairo-vm's own, one step per executed instruction, captured through
-//! `blockifier-patch/` and written as a CTFS container by `record.rs`.
+//! `blockifier-patch/` and written as a CTFS container by `record.rs`. The container is a
+//! function of its inputs: its recording id is derived from the block and the
+//! transaction, and its listings are interned as `./sources/<class_hash>.casm` relative
+//! to the capture directory, so two runs over one transcript write the same bytes.
 //!
 //! THE COMPARISON, which is what makes a recording a claim and not a guess: for every
 //! transaction, status, fee, L2 gas, L1 data gas, events, L2->L1 messages, its own state
@@ -594,7 +597,10 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
                 "sierraVersion": rec.sierra_version.as_ref().map(|v| v.to_string()),
             }));
             abis.insert(f.class_hash, rec.abi.clone());
-            paths.insert(f.class_hash, std::fs::canonicalize(&p)?);
+            paths.insert(
+                f.class_hash,
+                PathBuf::from(format!("./sources/{}.casm", f.class_hash.0.to_hex_string())),
+            );
             listings.insert(f.class_hash, l);
         }
         // Events per frame, joined to frames only where the two lists name the same
@@ -642,8 +648,11 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
             paths: &paths,
             abis: &abis,
         };
+        let recording_id =
+            record::derived_recording_id(blk.info.block_timestamp.0, &Felt::from_hex(&e.hash)?);
         let r = record::write_container(
             &label,
+            &recording_id,
             &dir,
             &e.frames,
             &events_by_frame,
@@ -657,6 +666,7 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         report["container"] = json!({
             "file": r.container.file_name().map(|n| n.to_string_lossy().to_string()),
             "bytes": bytes,
+            "recordingId": recording_id,
             "steps": r.steps,
             "entryPointFrames": r.frames,
             "internalCalls": r.internal_calls,

@@ -140,3 +140,23 @@ fn control_without_the_vm_observer_nothing_is_recorded() {
     assert_eq!(b["replayed"], 1, "{b:#}");
     assert!(!out.join(TX).exists());
 }
+
+#[test]
+fn two_runs_write_the_same_container_bytes() {
+    // The recording id is derived from the block and the transaction and the listings
+    // are interned relative to the capture directory, so where a run writes must not
+    // change what it writes. A build that holds a published container to the one it
+    // produces (blocktracer's F4) depends on exactly this.
+    let a = scratch("bytes-a");
+    let b = scratch("bytes-b-in-a-differently-named-directory");
+    run(&fixture(), &a, &[]);
+    run(&fixture(), &b, &[]);
+    let name = format!("starknet-{BLOCK}-{TX}.ct");
+    let x = std::fs::read(a.join(TX).join(&name)).unwrap();
+    let y = std::fs::read(b.join(TX).join(&name)).unwrap();
+    assert!(!x.is_empty());
+    assert!(
+        x == y,
+        "two runs over one transcript wrote different containers"
+    );
+}
