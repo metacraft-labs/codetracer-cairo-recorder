@@ -439,21 +439,33 @@ fn trace_block(
                     json!(hexu(&r["actual_fee"]["amount"]).map(|v| v.to_string())),
                     json!(info.receipt.fee.0.to_string()),
                 ));
-                facts.push(fact(
-                    "l2Gas",
-                    json!(r["execution_resources"]["l2_gas"]),
-                    json!(info.receipt.gas.l2_gas.0),
-                ));
-                facts.push(fact(
-                    "l1DataGas",
-                    json!(r["execution_resources"]["l1_data_gas"]),
-                    json!(info.receipt.gas.l1_data_gas.0),
-                ));
-                facts.push(fact(
-                    "l1Gas",
-                    json!(r["execution_resources"]["l1_gas"]),
-                    json!(info.receipt.gas.l1_gas.0),
-                ));
+                // A RECEIPT WHOSE GAS VECTOR IS NOT POPULATED IS NOT A MEASUREMENT. Measured
+                // on block 620,000 (Starknet 0.13.1): every receipt reports 0 for all three
+                // dimensions while charging a non-zero fee — which no execution can do — so
+                // the node did not record the vector for that era. Comparing the replay's
+                // gas against those zeros would publish 147 "divergences" that are absences.
+                // The rule is narrow on purpose: ALL THREE zero AND a non-zero fee; one zero
+                // dimension beside a populated one is still compared.
+                let res = &r["execution_resources"];
+                let unpopulated = ["l1_gas", "l1_data_gas", "l2_gas"]
+                    .iter()
+                    .all(|k| res[*k].as_u64() == Some(0))
+                    && hexu(&r["actual_fee"]["amount"]).unwrap_or(0) > 0;
+                for (field, key, replayed) in [
+                    ("l2Gas", "l2_gas", info.receipt.gas.l2_gas.0),
+                    ("l1DataGas", "l1_data_gas", info.receipt.gas.l1_data_gas.0),
+                    ("l1Gas", "l1_gas", info.receipt.gas.l1_gas.0),
+                ] {
+                    if unpopulated {
+                        facts.push(json!({
+                            "field": field, "published": res[key], "replayed": replayed,
+                            "matches": null,
+                            "notMeasured": "the receipt's gas vector is all zero beside a non-zero fee: the node did not populate it for this era",
+                        }));
+                    } else {
+                        facts.push(fact(field, json!(res[key]), json!(replayed)));
+                    }
+                }
                 let calls = call_infos(info, ty == "DEPLOY_ACCOUNT");
                 // `OrderedEvent::order` counts within one top-level phase (validate,
                 // execute, fee transfer each start again at 0), so events are ordered
@@ -571,11 +583,48 @@ fn trace_block(
                 });
                 // The call tree, entry point by entry point.
                 let theirs = trace_calls(&trace_root);
+                // A REVERTED TRANSACTION'S TRACE HAS NO EXECUTE TREE: the node replaces
+                // `execute_invocation` with `{revert_reason}` and lists validate and the fee
+                // transfer only, while the replay saw the execution that ran and was rolled
+                // back (measured: block 620,000, 10 reverted rows, 2 published entry points
+                // against 4-65 replayed). So for such a row the reverted top-level frame and
+                // everything under it are compared against nothing and reported separately,
+                // and the phases the trace does list are compared exactly.
+                let reverted_execute = trace_root.get("execute_invocation").is_some_and(|v| {
+                    v.get("contract_address").is_none() && v.get("revert_reason").is_some()
+                });
+                let tops: Vec<usize> = e
+                    .frames
+                    .iter()
+                    .filter(|f| f.parent.is_none())
+                    .map(|f| f.id)
+                    .collect();
+                let dropped_top = if reverted_execute && ty != "DEPLOY_ACCOUNT" && tops.len() == 3 {
+                    Some(tops[1])
+                } else {
+                    None
+                };
+                let in_dropped = |mut id: usize| -> bool {
+                    loop {
+                        if Some(id) == dropped_top {
+                            return true;
+                        }
+                        match e.frames[id].parent {
+                            Some(p) => id = p,
+                            None => return false,
+                        }
+                    }
+                };
                 let mine: Vec<(Felt, Felt, Felt)> = e
                     .frames
                     .iter()
+                    .filter(|f| !in_dropped(f.id))
                     .map(|f| (*f.storage_address.0.key(), f.class_hash.0, f.selector.0))
                     .collect();
+                if dropped_top.is_some() {
+                    report["revertedExecuteFrames"] =
+                        json!(e.frames.iter().filter(|f| in_dropped(f.id)).count());
+                }
                 if e.frames.is_empty() && !theirs.is_empty() {
                     // Not observed is not the same as not matching: with the observer off
                     // there are no frames to compare, and the fact is reported as such.
