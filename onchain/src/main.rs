@@ -72,6 +72,9 @@ enum Command {
         /// hold is a refusal.
         #[arg(long)]
         transcript_in: Option<PathBuf>,
+        /// Also measure the lowest block this pipeline can replay (see `probe_floor`).
+        #[arg(long)]
+        probe_floor: bool,
     },
 }
 
@@ -84,6 +87,7 @@ fn main() -> Result<()> {
             txs,
             transcript_out,
             transcript_in,
+            probe_floor,
         } => {
             let rpc = match (&transcript_in, &rpc_url) {
                 (Some(p), _) => {
@@ -93,7 +97,7 @@ fn main() -> Result<()> {
                 (None, Some(u)) => rpc::Rpc::new(u),
                 (None, None) => bail!("--rpc-url or --transcript-in is required"),
             };
-            let r = trace_block(&rpc, block, &out_dir, &txs);
+            let r = trace_block(&rpc, block, &out_dir, &txs, probe_floor);
             if let Some(p) = transcript_out {
                 let n = transcript::write(&p, rpc.url(), &rpc.transcript())?;
                 eprintln!("transcript: {n} answer(s) -> {}", p.display());
@@ -234,7 +238,13 @@ struct Executed {
     frames: Vec<bt_trace::Frame>,
 }
 
-fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -> Result<()> {
+fn trace_block(
+    rpc: &rpc::Rpc,
+    number: u64,
+    out_dir: &Path,
+    wanted: &[String],
+    probe: bool,
+) -> Result<()> {
     if number == 0 {
         bail!("block 0 has no parent block to read a prestate at");
     }
@@ -251,8 +261,6 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
             bail!("{w} is not a transaction of block {number}");
         }
     }
-    let ctx = block::block_context(&blk)?;
-    let old = block::old_block_hash(rpc, number)?;
     let traces = rpc.call(
         "starknet_traceBlockTransactions",
         json!([{ "block_number": number }]),
@@ -270,73 +278,130 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         })
         .collect();
 
-    let reader = state::RpcState::new(rpc, number - 1);
-    let classes = reader.classes.clone();
-    let bodies: Vec<&Value> = blk.txs.iter().map(|(_, b, _)| b).collect();
-    let prefetch = reader.prefetch(&bodies);
-    let mut txs = vec![];
-    for (h, body, _) in &blk.txs {
-        txs.push(block::executable(&reader, h, body)?);
-    }
-    let mut exec = TransactionExecutor::pre_process_and_create(
-        reader,
-        ctx,
-        old,
-        TransactionExecutorConfig::default(),
-    )
-    .map_err(|e| eyre!("pre-process block {number}: {e}"))?;
-
-    let mut executed = vec![];
+    // A BLOCK THE EXECUTOR CANNOT RUN IS A RESULT, NOT A FAILURE OF THIS RUN: every row
+    // in it is refused by name and the block report says why, so a window over an era
+    // the executor does not carry is measured as zero rather than missing.
     // THE CONTROL ARM FOR "THE STEPS ARE THE VM'S": with the observer not installed the
     // executor runs exactly as upstream, and this tool must then record NOTHING — there
     // is no other path that could fill a step stream in. `tests/offline.rs` runs it.
     let observe = std::env::var_os("CODETRACER_CAIRO_ONCHAIN_NO_OBSERVER").is_none();
-    for (i, ((h, body, receipt), tx)) in blk.txs.iter().zip(&txs).enumerate() {
-        if observe {
-            bt_trace::install();
+    let mut executed = vec![];
+    let mut summary = None;
+    let mut prefetch = state::PrefetchReport::default();
+    let classes;
+    match block::block_context(&blk) {
+        Err(e) => {
+            classes = state::Classes::default();
+            for (i, (h, body, receipt)) in blk.txs.iter().enumerate() {
+                executed.push(Executed {
+                    hash: h.clone(),
+                    index: i,
+                    body: body.clone(),
+                    receipt: receipt.clone(),
+                    result: Err(e.to_string()),
+                    frames: vec![],
+                });
+            }
         }
-        let result = exec.execute(tx).map_err(|e| e.to_string());
-        let frames = bt_trace::take().map(|s| s.frames).unwrap_or_default();
-        executed.push(Executed {
-            hash: h.clone(),
-            index: i,
-            body: body.clone(),
-            receipt: receipt.clone(),
-            result,
-            frames,
-        });
+        Ok(ctx) => {
+            let old = block::old_block_hash(rpc, number)?;
+            let reader = state::RpcState::new(rpc, number - 1);
+            classes = reader.classes.clone();
+            let bodies: Vec<&Value> = blk.txs.iter().map(|(_, b, _)| b).collect();
+            prefetch = reader.prefetch(&bodies);
+            // A body that does not convert stops the block there: the prestate of every
+            // later index is what this one would have left behind.
+            let txs: Vec<std::result::Result<_, String>> = blk
+                .txs
+                .iter()
+                .map(|(h, body, _)| block::executable(&reader, h, body).map_err(|e| e.to_string()))
+                .collect();
+            let mut exec = TransactionExecutor::pre_process_and_create(
+                reader,
+                ctx,
+                old,
+                TransactionExecutorConfig::default(),
+            )
+            .map_err(|e| eyre!("pre-process block {number}: {e}"))?;
+            let mut broken: Option<usize> = None;
+            for (i, ((h, body, receipt), tx)) in blk.txs.iter().zip(&txs).enumerate() {
+                let (result, frames) = match (broken, tx) {
+                    (Some(j), _) => (
+                        Err(format!(
+                            "index {j} of this block was refused, so the state this \
+                             transaction starts from is not the one the sequencer gave it"
+                        )),
+                        vec![],
+                    ),
+                    (None, Err(e)) => (Err(format!("the body does not convert: {e}")), vec![]),
+                    (None, Ok(tx)) => {
+                        if observe {
+                            bt_trace::install();
+                        }
+                        let result = exec.execute(tx).map_err(|e| e.to_string());
+                        (
+                            result,
+                            bt_trace::take().map(|s| s.frames).unwrap_or_default(),
+                        )
+                    }
+                };
+                if result.is_err() && broken.is_none() {
+                    broken = Some(i);
+                }
+                executed.push(Executed {
+                    hash: h.clone(),
+                    index: i,
+                    body: body.clone(),
+                    receipt: receipt.clone(),
+                    result,
+                    frames,
+                });
+            }
+            if broken.is_none() {
+                summary = Some(
+                    exec.non_consuming_finalize(OsInitialReadsCollection::Skip)
+                        .map_err(|e| eyre!("finalize block {number}: {e}"))?,
+                );
+            }
+        }
     }
-    let summary = exec
-        .non_consuming_finalize(OsInitialReadsCollection::Skip)
-        .map_err(|e| eyre!("finalize block {number}: {e}"))?;
 
-    // The block's whole state diff against the node's.
-    let su = rpc.call(
-        "starknet_getStateUpdate",
-        json!([{ "block_number": number }]),
-    )?;
-    let (chain_s, chain_n, chain_c) = rpc_diff(&su["state_diff"]);
-    let ours = &summary.state_diff;
-    let our_s: BTreeMap<(Felt, Felt), Felt> = ours
-        .storage_updates
-        .iter()
-        .flat_map(|(a, m)| m.iter().map(move |(k, v)| ((*a.0.key(), *k.0.key()), *v)))
-        .collect();
-    let our_n: BTreeMap<Felt, Felt> = ours
-        .address_to_nonce
-        .iter()
-        .map(|(a, n)| (*a.0.key(), n.0))
-        .collect();
-    let our_c: BTreeMap<Felt, Felt> = ours
-        .address_to_class_hash
-        .iter()
-        .map(|(a, c)| (*a.0.key(), c.0))
-        .collect();
-    let block_diff = json!({
-        "storageEntries": { "published": chain_s.len(), "replayed": our_s.len(), "matches": chain_s == our_s },
-        "nonces": { "published": chain_n.len(), "replayed": our_n.len(), "matches": chain_n == our_n },
-        "classHashes": { "published": chain_c.len(), "replayed": our_c.len(), "matches": chain_c == our_c },
-    });
+    // The block's whole state diff against the node's — measurable only when every
+    // transaction of the block ran, because the diff is the sum of all of them.
+    let block_diff = match &summary {
+        None => json!({
+            "notMeasured": "not every transaction of this block was executed, so there is no \
+                            replayed block state diff to compare"
+        }),
+        Some(summary) => {
+            let su = rpc.call(
+                "starknet_getStateUpdate",
+                json!([{ "block_number": number }]),
+            )?;
+            let (chain_s, chain_n, chain_c) = rpc_diff(&su["state_diff"]);
+            let ours = &summary.state_diff;
+            let our_s: BTreeMap<(Felt, Felt), Felt> = ours
+                .storage_updates
+                .iter()
+                .flat_map(|(a, m)| m.iter().map(move |(k, v)| ((*a.0.key(), *k.0.key()), *v)))
+                .collect();
+            let our_n: BTreeMap<Felt, Felt> = ours
+                .address_to_nonce
+                .iter()
+                .map(|(a, n)| (*a.0.key(), n.0))
+                .collect();
+            let our_c: BTreeMap<Felt, Felt> = ours
+                .address_to_class_hash
+                .iter()
+                .map(|(a, c)| (*a.0.key(), c.0))
+                .collect();
+            json!({
+                "storageEntries": { "published": chain_s.len(), "replayed": our_s.len(), "matches": chain_s == our_s },
+                "nonces": { "published": chain_n.len(), "replayed": our_n.len(), "matches": chain_n == our_n },
+                "classHashes": { "published": chain_c.len(), "replayed": our_c.len(), "matches": chain_c == our_c },
+            })
+        }
+    };
 
     std::fs::create_dir_all(out_dir)?;
     let mut tx_reports = vec![];
@@ -351,6 +416,11 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         match &e.result {
             Err(err) => {
                 report["outcome"] = json!("refused");
+                // `runtime-refused` is refusal-reasons.json's token for "the replay runtime
+                // declined by name": an era the executor carries no constants for, a body
+                // that does not convert, an executor error, or a preceding refusal that
+                // took this transaction's prestate with it. All are repairable.
+                report["refusalReason"] = json!("runtime-refused");
                 report["refusal"] = json!(format!("the executor refused the transaction: {err}"));
             }
             Ok((info, maps)) => {
@@ -556,10 +626,12 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         }
         if e.frames.is_empty() {
             report["recorded"] = json!(false);
-            report["notRecordedBecause"] = json!(if observe {
-                "the executor ran no entry point for this transaction"
-            } else {
-                "CODETRACER_CAIRO_ONCHAIN_NO_OBSERVER is set: the VM's trace was not observed, and no other source of steps exists"
+            report["notRecordedBecause"] = json!(match (&e.result, observe) {
+                (Err(err), _) => format!("the executor refused the transaction: {err}"),
+                (Ok(_), false) => "CODETRACER_CAIRO_ONCHAIN_NO_OBSERVER is set: the VM's trace \
+                                   was not observed, and no other source of steps exists"
+                    .to_string(),
+                (Ok(_), true) => "the executor ran no entry point for this transaction".to_string(),
             });
             continue;
         }
@@ -706,15 +778,17 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         "timestamp": blk.header["timestamp"],
         "prestate": { "readAt": number - 1, "prefetch": prefetch,
                       "rpcCalls": *rpc.calls.borrow() },
+        "chain": chain_facts(rpc, &blk)?,
+        "floorProbe": if probe { probe_floor(rpc)? } else { Value::Null },
+        "zeroGasPricesSubstituted": blk.substituted_gas_prices,
         "transactions": blk.txs.len(),
         "replayed": replayed,
         "recorded": recorded,
         "blockStateDiff": block_diff,
         "elapsedMs": started.elapsed().as_millis() as u64,
-        "perTransaction": tx_reports.iter().map(|r| json!({
-            "txHash": r["txHash"], "txIndex": r["txIndex"], "outcome": r["outcome"],
-            "recorded": r["recorded"], "steps": r["vm"]["steps"],
-        })).collect::<Vec<_>>(),
+        // EVERY ROW'S FULL REPORT, recorded or not: a refused row has no capture
+        // directory, and its outcome and reason are still part of the block.
+        "perTransaction": tx_reports,
     });
     std::fs::write(
         out_dir.join("block.json"),
@@ -742,4 +816,140 @@ fn trace_block(rpc: &rpc::Rpc, number: u64, out_dir: &Path, wanted: &[String]) -
         );
     }
     Ok(())
+}
+
+/// The chain's side of the capture, so a snapshot producer needs no network: the node's
+/// tip and L1-accepted head at capture, its spec version, the block header, and every
+/// transaction's body and receipt, verbatim.
+fn chain_facts(rpc: &rpc::Rpc, blk: &block::Block) -> Result<Value> {
+    let tip = rpc.call("starknet_blockNumber", json!([]))?;
+    let l1 = rpc.call("starknet_getBlockWithTxHashes", json!(["l1_accepted"]))?;
+    let spec = rpc.call("starknet_specVersion", json!([]))?;
+    let control = match rpc.answer("thisMethodDoesNotExist", json!([]))? {
+        rpc::Answer::Ok(_) => json!({ "classified": "ok" }),
+        rpc::Answer::Error { code, .. } => json!({
+            "classified": if code == -32601 { "absent" } else { "policy" }, "code": code,
+        }),
+    };
+    let mut header = blk.header.clone();
+    if let Some(o) = header.as_object_mut() {
+        o.remove("transactions");
+    }
+    Ok(json!({
+        "tip": tip,
+        "l1Accepted": l1["block_number"],
+        "specVersion": spec,
+        "endpointControl": control,
+        "header": header,
+        "transactions": blk.txs.iter().map(|(h, b, r)| json!({
+            "hash": h, "body": b, "receipt": r,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// THE LOWEST BLOCK THIS PIPELINE CAN REPLAY, and what it rests on — measured, with
+/// controls, so the published floor is a reading and not a typed number.
+///
+/// Two limits compose and the higher one is the floor:
+///
+///   * the EXECUTOR's: the oldest Starknet version it carries versioned constants for.
+///     Found by bisecting block versions with the executor's OWN predicate
+///     (`VersionedConstants::get`), so the floor is what the executor refuses below and
+///     not a version string somebody copied. Controls: the block below is refused and
+///     the floor block is accepted, by that same call.
+///   * the NODE's: whether it serves state at the floor's parent block at all. Read as
+///     the class of a long-lived contract (the ETH fee token) at that block — positive
+///     control: a non-zero class hash — against an address nothing was deployed at,
+///     which must answer differently (negative control). And once BELOW the floor, so
+///     the reading says which of the two limits binds.
+fn probe_floor(rpc: &rpc::Rpc) -> Result<Value> {
+    use blockifier::blockifier_versioned_constants::VersionedConstants;
+    use starknet_api::block::StarknetVersion;
+    use starknet_api::versioned_constants_logic::VersionedConstantsTrait;
+    let tip = rpc
+        .call("starknet_blockNumber", json!([]))?
+        .as_u64()
+        .ok_or_else(|| eyre!("starknet_blockNumber is not a number"))?;
+    let version_at = |b: u64| -> Result<String> {
+        let h = rpc.call(
+            "starknet_getBlockWithTxHashes",
+            json!([{ "block_number": b }]),
+        )?;
+        Ok(h["starknet_version"].as_str().unwrap_or("").to_string())
+    };
+    let accepted = |v: &str| -> bool {
+        StarknetVersion::try_from(v.to_string())
+            .ok()
+            .map(|sv| VersionedConstants::get(&sv).is_ok())
+            .unwrap_or(false)
+    };
+    if !accepted(&version_at(tip)?) {
+        bail!("the executor carries no constants for the chain's TIP version; no floor exists");
+    }
+    let (mut lo, mut hi) = (0u64, tip);
+    if accepted(&version_at(0)?) {
+        hi = 0;
+    } else {
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if accepted(&version_at(mid)?) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+    }
+    let floor = hi;
+    let below = if floor > 0 {
+        Some(version_at(floor - 1)?)
+    } else {
+        None
+    };
+    let at = version_at(floor)?;
+    const ETH: &str = "0x49d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
+    const NOTHING: &str = "0xdead";
+    let class_at = |addr: &str, b: u64| -> Result<Value> {
+        Ok(
+            match rpc.answer(
+                "starknet_getClassHashAt",
+                json!({ "block_id": { "block_number": b }, "contract_address": addr }),
+            )? {
+                rpc::Answer::Ok(v) => json!({ "classHash": v }),
+                rpc::Answer::Error { code, message, .. } => {
+                    json!({ "error": code, "message": message })
+                }
+            },
+        )
+    };
+    let parent = floor.saturating_sub(1);
+    let deep = parent / 2;
+    let at_parent = class_at(ETH, parent)?;
+    let nothing = class_at(NOTHING, parent)?;
+    let below_floor = class_at(ETH, deep)?;
+    let positive = at_parent
+        .get("classHash")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| c != "0x0");
+    let negative = at_parent != nothing;
+    Ok(json!({
+        "pipelineFloor": floor,
+        "executorFloor": {
+            "block": floor,
+            "version": at,
+            "versionBelow": below,
+            "predicate": "blockifier VersionedConstants::get(starknet_version)",
+            "acceptedAtFloor": accepted(&at),
+            "refusedBelow": below.as_deref().map(|v| !accepted(v)),
+        },
+        "nodeState": {
+            "method": "starknet_getClassHashAt",
+            "atFloorParent": { "block": parent, "address": ETH, "answer": at_parent },
+            "negativeControl": { "block": parent, "address": NOTHING, "answer": nothing },
+            "belowFloor": { "block": deep, "address": ETH, "answer": below_floor },
+            "positiveControlHeld": positive,
+            "negativeControlHeld": negative,
+        },
+        "binds": "executor",
+        "tipAtProbe": tip,
+    }))
 }

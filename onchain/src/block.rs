@@ -38,14 +38,25 @@ pub struct Block {
     pub starknet_version: String,
     /// `(hash, raw RPC body, receipt)` in block order.
     pub txs: Vec<(String, Value, Value)>,
+    /// Header gas prices that were zero and were substituted with the minimum.
+    pub substituted_gas_prices: Vec<String>,
 }
 
-fn gas(v: &Value) -> Result<NonzeroGasPrice> {
+/// One header gas price. A ZERO price — which headers carry for dimensions the era did
+/// not charge (measured: block 480,000, Starknet 0.12.3) — is not representable in the
+/// executor's `NonzeroGasPrice`, so it is substituted with the minimum and the
+/// substitution is RECORDED by name in `substituted`, never silently. If the
+/// substitution ever mattered, the fee comparison — a counted fact — would show it.
+fn gas(v: &Value, name: &str, substituted: &mut Vec<String>) -> Result<NonzeroGasPrice> {
     let s = v
         .as_str()
-        .ok_or_else(|| eyre!("gas price {v} is not a string"))?;
+        .ok_or_else(|| eyre!("gas price {name} = {v} is not a string"))?;
     let n = u128::from_str_radix(s.trim_start_matches("0x"), 16)?;
-    NonzeroGasPrice::new(GasPrice(n)).map_err(|e| eyre!("gas price {s}: {e}"))
+    if n == 0 {
+        substituted.push(name.to_string());
+        return Ok(NonzeroGasPrice::MIN);
+    }
+    NonzeroGasPrice::new(GasPrice(n)).map_err(|e| eyre!("gas price {name} = {s}: {e}"))
 }
 
 pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
@@ -61,6 +72,7 @@ pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
         .clone()
         .try_into()
         .map_err(|e| eyre!("block {number}: starknet_version {sv:?}: {e:?}"))?;
+    let mut sub = vec![];
     let info = BlockInfo {
         block_number: BlockNumber(number),
         block_timestamp: BlockTimestamp(header["timestamp"].as_u64().unwrap_or(0)),
@@ -69,14 +81,38 @@ pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
         )?)?,
         gas_prices: GasPrices {
             eth_gas_prices: GasPriceVector {
-                l1_gas_price: gas(&header["l1_gas_price"]["price_in_wei"])?,
-                l1_data_gas_price: gas(&header["l1_data_gas_price"]["price_in_wei"])?,
-                l2_gas_price: gas(&header["l2_gas_price"]["price_in_wei"])?,
+                l1_gas_price: gas(
+                    &header["l1_gas_price"]["price_in_wei"],
+                    "l1_gas_price.price_in_wei",
+                    &mut sub,
+                )?,
+                l1_data_gas_price: gas(
+                    &header["l1_data_gas_price"]["price_in_wei"],
+                    "l1_data_gas_price.price_in_wei",
+                    &mut sub,
+                )?,
+                l2_gas_price: gas(
+                    &header["l2_gas_price"]["price_in_wei"],
+                    "l2_gas_price.price_in_wei",
+                    &mut sub,
+                )?,
             },
             strk_gas_prices: GasPriceVector {
-                l1_gas_price: gas(&header["l1_gas_price"]["price_in_fri"])?,
-                l1_data_gas_price: gas(&header["l1_data_gas_price"]["price_in_fri"])?,
-                l2_gas_price: gas(&header["l2_gas_price"]["price_in_fri"])?,
+                l1_gas_price: gas(
+                    &header["l1_gas_price"]["price_in_fri"],
+                    "l1_gas_price.price_in_fri",
+                    &mut sub,
+                )?,
+                l1_data_gas_price: gas(
+                    &header["l1_data_gas_price"]["price_in_fri"],
+                    "l1_data_gas_price.price_in_fri",
+                    &mut sub,
+                )?,
+                l2_gas_price: gas(
+                    &header["l2_gas_price"]["price_in_fri"],
+                    "l2_gas_price.price_in_fri",
+                    &mut sub,
+                )?,
             },
         },
         use_kzg_da: header["l1_da_mode"].as_str() == Some("BLOB"),
@@ -103,6 +139,7 @@ pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
         info,
         starknet_version: sv,
         txs,
+        substituted_gas_prices: sub,
     })
 }
 

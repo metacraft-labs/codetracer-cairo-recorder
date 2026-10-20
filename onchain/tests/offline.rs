@@ -160,3 +160,44 @@ fn two_runs_write_the_same_container_bytes() {
         "two runs over one transcript wrote different containers"
     );
 }
+
+#[test]
+fn a_block_of_an_era_the_executor_does_not_carry_is_refused_by_name() {
+    // The same transcript with the block header's version rewritten to 0.12.3 — the era
+    // below the oldest versioned constants the executor carries. The run must SUCCEED and
+    // say so per row, rather than fail or record anything: a window over that era is
+    // measured as zero, not missing.
+    let t = scratch("old-era-transcript");
+    copy_dir(&fixture(), &t);
+    let idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(t.join("index.json")).unwrap()).unwrap();
+    let file = idx["answers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.starts_with("starknet_getBlockWithReceipts"))
+        .map(|(_, f)| f.as_str().unwrap().to_string())
+        .unwrap();
+    let path = t.join("answers").join(&file);
+    let gz = std::fs::read(&path).unwrap();
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut s).unwrap();
+    let mut v: Value = serde_json::from_str(&s).unwrap();
+    v["result"]["starknet_version"] = Value::String("0.12.3".into());
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut enc, serde_json::to_string(&v).unwrap().as_bytes()).unwrap();
+    std::fs::write(&path, enc.finish().unwrap()).unwrap();
+
+    let out = scratch("old-era");
+    let b = run(&t, &out, &[]);
+    assert_eq!(b["replayed"], 0, "{b:#}");
+    assert_eq!(b["recorded"], 0, "{b:#}");
+    let row = &b["perTransaction"][0];
+    assert_eq!(row["outcome"], "refused");
+    assert_eq!(row["refusalReason"], "runtime-refused");
+    assert!(
+        row["refusal"].as_str().unwrap().contains("0.12.3"),
+        "the refusal names the era: {row:#}"
+    );
+    assert!(b["blockStateDiff"]["notMeasured"].is_string());
+}
