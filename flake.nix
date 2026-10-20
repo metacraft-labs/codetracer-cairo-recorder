@@ -5,6 +5,11 @@
     mcl-blockchain.url = "github:metacraft-labs/nix-blockchain-development";
     nixpkgs.follows = "mcl-blockchain/nixpkgs";
     flake-utils.follows = "mcl-blockchain/flake-utils";
+    # The on-chain replay (`onchain/`) builds StarkWare's executor, whose cairo-lang
+    # 2.19.x requires rustc >= 1.94; every nixpkgs reachable through mcl-blockchain
+    # carries 1.91.1. So that one package gets its Rust from here, and only that one:
+    # the recorder itself stays on the shared toolchain. See onchain/README.md.
+    nixpkgs-onchain.url = "github:NixOS/nixpkgs/8f89cbf5e607a5831cc1a3c75c42119dbf406c6a"; # nixpkgs-unstable, 2026-10-04: rustc 1.98.1
   };
 
   outputs =
@@ -13,15 +18,15 @@
       nixpkgs,
       flake-utils,
       mcl-blockchain,
+      nixpkgs-onchain,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
-      in
-      {
-        devShells.default = pkgs.mkShell {
+        onchainPkgs = import nixpkgs-onchain { inherit system; };
+        defaultShell = pkgs.mkShell {
           inputsFrom = [ mcl-blockchain.devShells.${system}.cairo ];
           packages = [
             pkgs.zstd # required by libcodetracer_trace_writer (Nim FFI)
@@ -81,6 +86,24 @@
               export CARGO_HOME="$_ct_cargo_home"
             fi
             unset _ct_real_cargo_home _ct_cargo_home _ct_entry
+          '';
+        };
+      in
+      {
+        devShells.default = defaultShell;
+
+        # `nix develop .#onchain` — the default shell (Nim, zstd, the trace-format
+        # build inputs, the CARGO_HOME isolation above) with a newer Rust first on PATH.
+        devShells.onchain = pkgs.mkShell {
+          inputsFrom = [ defaultShell ];
+          packages = [
+            onchainPkgs.rustc
+            onchainPkgs.cargo
+            onchainPkgs.rustfmt
+            onchainPkgs.clippy
+          ];
+          shellHook = ''
+            export PATH="${onchainPkgs.rustc}/bin:${onchainPkgs.cargo}/bin:${onchainPkgs.rustfmt}/bin:${onchainPkgs.clippy}/bin:$PATH"
           '';
         };
       }

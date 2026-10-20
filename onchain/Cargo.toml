@@ -1,0 +1,44 @@
+[package]
+name = "codetracer-cairo-onchain"
+version = "0.1.0"
+edition = "2021"
+authors = ["Metacraft Labs Ltd"]
+description = "Re-executes mined Starknet transactions in StarkWare's own executor (blockifier, over cairo-vm) and records them for CodeTracer"
+license = "Apache-2.0"
+
+# A SEPARATE PACKAGE WITH ITS OWN LOCK, NOT A MODULE OF THE RECORDER, because the
+# two pin different cairo-lang releases (the recorder 2.17.0-rc.4, blockifier
+# 0.20.0-rc.1 requires 2.19.5) and Cargo unifies semver-compatible versions
+# within one lock. See README.md in this directory.
+[workspace]
+
+[[bin]]
+name = "codetracer-cairo-onchain"
+path = "src/main.rs"
+
+[dependencies]
+# CodeTracer trace format (siblings, as for the recorder itself).
+codetracer_trace_types = { path = "../../codetracer-trace-format/codetracer_trace_types" }
+codetracer_trace_writer_nim = { path = "../../codetracer-trace-format/codetracer_trace_writer_nim" }
+blockifier = { version = "=0.20.0-rc.1", features = ["tracing", "reexecution"] }
+starknet_api = "=0.20.0-rc.1"
+cairo-lang-starknet-classes = "=2.19.5"
+cairo-lang-utils = "=2.19.5"
+cairo-vm = "=3.2.0"
+starknet-types-core = "0.2"
+num-bigint = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+indexmap = "2"
+ureq = { version = "2", features = ["json"] }
+flate2 = "1"
+base64 = "0.22"
+eyre = "0.6"
+clap = { version = "4", features = ["derive"] }
+
+# THE EXECUTOR, WITH CODETRACER'S OBSERVER. `vendor/blockifier` is produced by
+# `vendor-blockifier.sh` (crates.io tarball, checksum-verified, + blockifier-patch/) and
+# is not committed. Run that script before any cargo command here; `just onchain-build`
+# in the parent directory does.
+[patch.crates-io]
+blockifier = { path = "vendor/blockifier" }

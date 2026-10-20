@@ -249,3 +249,25 @@ verify-scoop:
 
 verify-chocolatey:
     just verify-package chocolatey
+
+# --- On-chain replay: mined Starknet transactions, in StarkWare's own executor ---
+#
+# `onchain/` is a separate package with its own lock and its own Rust (cairo-lang
+# 2.19.x needs rustc >= 1.94; see flake.nix's `nixpkgs-onchain`), so these recipes
+# enter `nix develop .#onchain` themselves. `vendor-blockifier.sh` produces the patched
+# executor (crates.io tarball, checksum-verified, + onchain/blockifier-patch/) before
+# any cargo command. See onchain/README.md.
+
+onchain-build:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo build --release --locked'
+
+onchain-test:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo test --release --locked'
+
+onchain-lint:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings'
+
+# Record every transaction of one mainnet block (or only --tx ones) into OUT.
+#   just onchain-trace-block 16664437 https://api.cartridge.gg/x/starknet/mainnet ./out
+onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
+  onchain/target/release/codetracer-cairo-onchain trace-block {{BLOCK}} --rpc-url {{RPC}} -o {{OUT}} {{ARGS}}
