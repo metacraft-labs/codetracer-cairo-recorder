@@ -10,7 +10,10 @@ build:
 build-release:
   cargo build --release --locked
 
-test:
+# `onchain-test` is part of `test` so the shared CI workflow (which runs `just test`)
+# runs the on-chain replay's offline suite too: BlockTracer's Starknet path must not be
+# a suite that only runs when somebody remembers it (Recorder-Cairo CXP-CAIRO-2).
+test: onchain-test
   cargo test --locked
   bash tests/verify-cli-convention-no-silent-skip.sh
   bash tests/test-fetch-cairo-corelib.sh
@@ -23,7 +26,7 @@ test-rust:
 verify-cli-convention:
   bash tests/verify-cli-convention-no-silent-skip.sh
 
-lint:
+lint: onchain-lint
   cargo fmt --check
   cargo clippy --locked --all-targets -- -D warnings
   bash tests/verify-cli-convention-no-silent-skip.sh
