@@ -170,7 +170,17 @@ pub fn block_context(block: &Block) -> Result<BlockContext> {
         block.info.clone(),
         chain_info(),
         vc,
-        BouncerConfig::max(),
+        // EVERY CAPACITY AT MAX, proving gas included. The chain already admitted this
+        // block, so a replay must never refuse a transaction for block-capacity reasons —
+        // that is the sequencer's admission policy, not execution. `BouncerConfig::max()`
+        // keeps `proving_gas` at its DEFAULT capacity, and that was measured refusing block
+        // 1,400,001 (Starknet 0.13.5) at index 116 of 130: "block capacity reached". The
+        // bouncer's weights feed no counted fact (fee and gas come from the receipt
+        // computation), so lifting the cap changes nothing a comparison reads.
+        BouncerConfig {
+            block_max_capacity: blockifier::bouncer::BouncerWeights::max(),
+            ..BouncerConfig::max()
+        },
     ))
 }
 
