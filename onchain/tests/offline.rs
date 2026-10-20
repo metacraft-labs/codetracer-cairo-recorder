@@ -201,3 +201,45 @@ fn a_block_of_an_era_the_executor_does_not_carry_is_refused_by_name() {
     );
     assert!(b["blockStateDiff"]["notMeasured"].is_string());
 }
+
+#[test]
+fn control_a_mutated_call_tree_is_caught_by_the_differential() {
+    // One selector changed in the node's trace of the block — the call-tree differential
+    // must report the row `divergent` on `callTree` and nothing else, while every
+    // consensus fact and the block diff still match. A differential that cannot fire would
+    // read clean here too.
+    let t = scratch("calltree-transcript");
+    copy_dir(&fixture(), &t);
+    let idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(t.join("index.json")).unwrap()).unwrap();
+    let file = idx["answers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.starts_with("starknet_traceBlockTransactions"))
+        .map(|(_, f)| f.as_str().unwrap().to_string())
+        .unwrap();
+    let path = t.join("answers").join(&file);
+    let gz = std::fs::read(&path).unwrap();
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut s).unwrap();
+    let mut v: Value = serde_json::from_str(&s).unwrap();
+    v["result"][0]["trace_root"]["validate_invocation"]["entry_point_selector"] =
+        Value::String("0x1".into());
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut enc, serde_json::to_string(&v).unwrap().as_bytes()).unwrap();
+    std::fs::write(&path, enc.finish().unwrap()).unwrap();
+
+    let b = run(&t, &scratch("calltree"), &[]);
+    let row = &b["perTransaction"][0];
+    assert_eq!(row["outcome"], "divergent", "{row:#}");
+    let bad: Vec<&str> = row["effects"]["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["matches"] == false)
+        .map(|f| f["field"].as_str().unwrap())
+        .collect();
+    assert_eq!(bad, vec!["callTree"]);
+    assert_eq!(b["blockStateDiff"]["storageEntries"]["matches"], true);
+}
