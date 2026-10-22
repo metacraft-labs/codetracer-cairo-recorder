@@ -338,12 +338,14 @@ fn a_bound_class_is_listed_with_its_build_names() {
     );
     assert_eq!(row["source"]["provenance"]["build"]["tag"], "account-0.4.0");
     for c in class_rows(&bound) {
-        if c["classHash"] != row["classHash"] {
-            assert!(
-                c["source"].is_null(),
-                "only the bound class says it is: {c:#}"
-            );
-        }
+        // Exactly the classes with a committed binding say they are bound.
+        let has_binding = std::fs::read_dir(sources()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(c["classHash"].as_str().unwrap())
+        });
+        assert_eq!(c["source"]["bound"] == true, has_binding, "{c:#}");
     }
 
     // Every call target the plain listing could only name by pc is named by the build.
@@ -472,4 +474,126 @@ fn control_bind_class_refuses_one_changed_sierra_felt() {
 /// `scratch` without the wipe, for reading what a step wrote.
 fn scratch_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ct-cairo-onchain-{}-{name}", std::process::id()))
+}
+
+// ── Cairo source lines (a build with statement locations, its sources embedded) ──────
+//
+// The two StarkGate v3.0.0 token classes this block's transaction moves (STRK, ETH;
+// starknet-io/starkgate-contracts @ 07e11c3, Apache-2.0, Scarb 2.15.1) are bound from a
+// build with `add-statements-code-locations-debug-info`, with `--embed-sources`. Ekubo
+// Core (EkuboProtocol/starknet-contracts v5.0.3, Scarb 2.20.0) is bound from such a build
+// too but WITHOUT its sources — its licence reserves distribution — so it is the in-run
+// control: located, named, and still positioned on CASM.
+
+const STRK: &str = "0x2e77ee61d4df3d988ee1f42ea5442e913862cc82c2584d212ecda76666498fc";
+const EKUBO_CORE: &str = "0x423df19e032f2d9bf9bb5bc1ea96db2b06d4c752c8c130cba7d577eed1de20a";
+const ERC20: &str = "./sources/cairo/openzeppelin_token@3.0.0/src/erc20/erc20.cairo";
+
+fn container_report(out: &Path) -> Value {
+    let r: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(TX).join("report.json")).unwrap())
+            .unwrap();
+    assert_eq!(r["outcome"], "replayed");
+    assert_eq!(r["container"]["steps"], 18903);
+    r
+}
+
+#[test]
+fn steps_in_a_class_with_embedded_sources_are_on_cairo_lines() {
+    let out = scratch("cairo-lines");
+    run_with_sources(&sources(), &out);
+    let r = container_report(&out);
+    assert_eq!(r["container"]["cairoSteps"], 1197, "{:#}", r["container"]);
+    let files: Vec<&str> = r["container"]["cairoSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(files.len(), 13, "only files a step is shown in: {files:?}");
+    assert!(files.contains(&ERC20));
+    assert!(files
+        .contains(&"./sources/cairo/starkgate-contracts/packages/strk/src/erc20_lockable.cairo"));
+    assert!(
+        files
+            .iter()
+            .all(|f| !f.contains("ekubo") && !f.starts_with("./sources/cairo/starknet-contracts")),
+        "a binding without embedded sources positions nothing on source: {files:?}"
+    );
+    // The file written beside the container is the text the build read.
+    let binding = gz_json(&sources().join(format!("{STRK}.json.gz")));
+    let embedded = binding["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "openzeppelin_token@3.0.0/src/erc20/erc20.cairo")
+        .unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(out.join(TX).join(ERC20)).unwrap(),
+        embedded
+    );
+    let core = r["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["classHash"] == EKUBO_CORE)
+        .unwrap()
+        .clone();
+    assert_eq!(core["source"]["bound"], true);
+    assert_eq!(core["source"]["codeLocations"], true);
+}
+
+#[test]
+fn control_the_same_bindings_without_their_texts_position_nothing_on_source() {
+    let dir = scratch("cairo-no-text");
+    std::fs::create_dir_all(&dir).unwrap();
+    for e in std::fs::read_dir(sources()).unwrap() {
+        let p = e.unwrap().path();
+        let mut doc = gz_json(&p);
+        if let Some(files) = doc["files"].as_array_mut() {
+            for f in files {
+                f.as_object_mut().unwrap().remove("text");
+            }
+        }
+        let name = p.file_name().unwrap().to_string_lossy().replace(".gz", "");
+        std::fs::write(dir.join(name), doc.to_string()).unwrap();
+    }
+    let out = scratch("cairo-no-text-out");
+    run_with_sources(&dir, &out);
+    let r = container_report(&out);
+    assert_eq!(r["container"]["cairoSteps"], 0);
+    assert_eq!(r["container"]["cairoSources"].as_array().unwrap().len(), 0);
+    assert!(!out.join(TX).join("sources/cairo").exists());
+    let bound = r["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["source"]["bound"] == true)
+        .count();
+    assert_eq!(bound, 4, "names still apply without the texts");
+}
+
+#[test]
+fn control_an_embedded_text_that_is_not_the_file_the_build_read_is_refused() {
+    let dir = scratch("cairo-bad-text");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut doc = gz_json(&sources().join(format!("{STRK}.json.gz")));
+    let f = &mut doc["files"].as_array_mut().unwrap()[0];
+    let t = f["text"].as_str().unwrap().replacen("fn ", "fn  ", 1);
+    f["text"] = Value::String(t);
+    std::fs::write(dir.join(format!("{STRK}.json")), doc.to_string()).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["trace-block", BLOCK, "--transcript-in"])
+        .arg(fixture())
+        .arg("-o")
+        .arg(scratch("cairo-bad-text-out"))
+        .arg("--class-sources")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("does not hash to its sha256"));
 }

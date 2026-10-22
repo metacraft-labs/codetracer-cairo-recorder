@@ -54,6 +54,8 @@ pub struct Recorded {
     pub frames: usize,
     pub internal_calls: usize,
     pub events_written: usize,
+    /// Steps positioned on a Cairo source line rather than a CASM listing line.
+    pub cairo_steps: usize,
 }
 
 fn big(f: &Felt, type_id: codetracer_trace_types::TypeId) -> ValueRecord {
@@ -84,6 +86,11 @@ pub struct Context<'a> {
     /// relative to the capture directory, so a container names no work directory.
     pub paths: &'a HashMap<ClassHash, PathBuf>,
     pub abis: &'a HashMap<ClassHash, serde_json::Value>,
+    /// Per class with a bound build that embeds its sources: pc -> the Cairo file (as
+    /// interned) and line the step is shown at. A pc not here stays on its CASM line.
+    pub cairo_at: &'a HashMap<ClassHash, HashMap<usize, (PathBuf, u32)>>,
+    /// Every Cairo file those name, as interned, with its line lengths.
+    pub cairo_files: &'a [(PathBuf, Vec<u32>)],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +130,9 @@ pub fn write_container(
                 .map_err(|e| eyre!("{e}"))?;
         }
     }
+    for (path, lens) in cx.cairo_files {
+        TraceWriter::register_path_with_line_lengths(w, path, lens).map_err(|e| eyre!("{e}"))?;
+    }
     let first_path = frames
         .first()
         .map(|f| cx.paths[&f.class_hash].clone())
@@ -145,6 +155,7 @@ pub fn write_container(
         steps: 1,
         frames: frames.len(),
         internal_calls: 0,
+        cairo_steps: 0,
         events_written: 0,
     };
 
@@ -228,7 +239,13 @@ pub fn write_container(
                     emit(w, c, *k, rec);
                 }
             }
-            TraceWriter::register_step_with_column(w, path, line_of(s.pc), None);
+            match c.cx.cairo_at.get(&f.class_hash).and_then(|m| m.get(&s.pc)) {
+                Some((p, l)) => {
+                    TraceWriter::register_step_with_column(w, p, Line(*l as i64), None);
+                    rec.cairo_steps += 1;
+                }
+                None => TraceWriter::register_step_with_column(w, path, line_of(s.pc), None),
+            }
             rec.steps += 1;
             use cairo_vm::types::instruction::Opcode;
             match listing.decoded.get(&s.pc).map(|i| i.opcode) {

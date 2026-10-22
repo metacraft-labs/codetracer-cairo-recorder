@@ -99,6 +99,16 @@ enum Command {
         /// Published verbatim beside the binding.
         #[arg(long = "build")]
         build: Vec<String>,
+        /// `LABEL=DIR`, repeated: a build path under DIR is published as `LABEL/<relative>`.
+        /// Paths in Scarb's cache are named by package and version without one; any other
+        /// path is refused, so no machine-specific path reaches a binding.
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Carry the text of every file a statement location names, so a trace can
+        /// position steps on Cairo lines. Only for sources whose licences allow it to be
+        /// republished; without it the binding carries names and file hashes only.
+        #[arg(long)]
+        embed_sources: bool,
         #[arg(short = 'o', long)]
         out: PathBuf,
     },
@@ -140,8 +150,18 @@ fn main() -> Result<()> {
             chain_class,
             built,
             build,
+            roots,
+            embed_sources,
             out,
         } => {
+            let roots = roots
+                .iter()
+                .map(|r| {
+                    r.split_once('=')
+                        .map(|(l, d)| (l.to_string(), PathBuf::from(d)))
+                        .ok_or_else(|| eyre!("--root {r}: expected LABEL=DIR"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let h = Felt::from_hex(&class_hash).map_err(|e| eyre!("class hash: {e}"))?;
             let mut b = serde_json::Map::new();
             for kv in &build {
@@ -150,7 +170,14 @@ fn main() -> Result<()> {
                     .ok_or_else(|| eyre!("--build {kv}: expected key=value"))?;
                 b.insert(k.to_string(), json!(v));
             }
-            let doc = source::bind(&chain_class, &built, h, Value::Object(b))?;
+            let doc = source::bind(
+                &chain_class,
+                &built,
+                h,
+                Value::Object(b),
+                &roots,
+                embed_sources,
+            )?;
             let text = serde_json::to_string(&doc)?;
             if out.extension().is_some_and(|x| x == "gz") {
                 use std::io::Write;
@@ -760,6 +787,9 @@ fn trace_block(
         let mut paths = HashMap::new();
         let mut abis = HashMap::new();
         let mut class_rows = vec![];
+        // Cairo sources a bound build embeds, interned as `./sources/cairo/<stable path>`.
+        let mut cairo_at: HashMap<_, HashMap<usize, (PathBuf, u32)>> = HashMap::new();
+        let mut cairo_texts: BTreeMap<PathBuf, String> = BTreeMap::new();
         for f in &e.frames {
             if listings.contains_key(&f.class_hash) {
                 continue;
@@ -793,6 +823,27 @@ fn trace_block(
                 },
             };
             let l = listing::build(&rec, bound.as_ref());
+            if let Some(bd) = bound.as_ref().filter(|bd| !bd.pc_location.is_empty()) {
+                let mut at = HashMap::new();
+                for (pc, (fi, line, _col)) in &bd.pc_location {
+                    let (name, text) = &bd.files[*fi];
+                    let interned = PathBuf::from(format!("./sources/cairo/{name}"));
+                    if let Some(t) = text {
+                        match cairo_texts.get(&interned) {
+                            Some(prev) if prev != t => bail!(
+                                "{}: two bound classes embed different texts for {name}",
+                                e.hash
+                            ),
+                            Some(_) => {}
+                            None => {
+                                cairo_texts.insert(interned.clone(), t.clone());
+                            }
+                        }
+                        at.insert(*pc, (interned, *line));
+                    }
+                }
+                cairo_at.insert(f.class_hash, at);
+            }
             let p = src.join(format!("{}.casm", f.class_hash.0.to_hex_string()));
             std::fs::write(&p, &l.text)?;
             class_rows.push(json!({
@@ -851,10 +902,35 @@ fn trace_block(
             .ok()
             .and_then(|(i, _)| i.revert_error.as_ref().map(|r| r.to_string()));
         let label = format!("starknet-{}-{}", number, e.hash);
+        // Only the files a step of THIS transaction is shown in: BlockTracer shows the
+        // source of the code that ran, not every file the class's build touched
+        // (Source-Resolution.md §8).
+        let used: std::collections::BTreeSet<&PathBuf> = e
+            .frames
+            .iter()
+            .flat_map(|f| {
+                let at = cairo_at.get(&f.class_hash);
+                f.steps
+                    .iter()
+                    .filter_map(move |s| at.and_then(|m| m.get(&s.pc)).map(|x| &x.0))
+            })
+            .collect();
+        let mut cairo_files = vec![];
+        for (interned, text) in cairo_texts.iter().filter(|(p, _)| used.contains(p)) {
+            let on_disk = dir.join(interned);
+            std::fs::create_dir_all(on_disk.parent().unwrap_or(&dir))?;
+            std::fs::write(&on_disk, text)?;
+            cairo_files.push((
+                interned.clone(),
+                text.lines().map(|l| l.len() as u32).collect::<Vec<_>>(),
+            ));
+        }
         let cx = record::Context {
             listings: &listings,
             paths: &paths,
             abis: &abis,
+            cairo_at: &cairo_at,
+            cairo_files: &cairo_files,
         };
         let recording_id =
             record::derived_recording_id(blk.info.block_timestamp.0, &Felt::from_hex(&e.hash)?);
@@ -879,6 +955,8 @@ fn trace_block(
             "entryPointFrames": r.frames,
             "internalCalls": r.internal_calls,
             "eventsWritten": r.events_written,
+            "cairoSteps": r.cairo_steps,
+            "cairoSources": cairo_files.iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>(),
             "eventsJoinedToFrames": events_joined,
         });
         report["classes"] = json!(class_rows);

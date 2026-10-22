@@ -1489,6 +1489,7 @@ dependencies = [
  "num-bigint",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "starknet-types-core",
  "starknet_api",
  "ureq",

@@ -33,6 +33,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 indexmap = "2"
 ureq = { version = "2", features = ["json"] }
 flate2 = "1"
+sha2 = "0.10"
 base64 = "0.22"
 eyre = "0.6"
 clap = { version = "4", features = ["derive"] }

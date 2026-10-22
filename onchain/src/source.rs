@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cairo_lang_sierra::debug_info::DebugInfo;
 use cairo_lang_starknet_classes::contract_class::ContractClass as CairoLangContractClass;
@@ -40,6 +40,10 @@ pub struct Binding {
     pub class_hash: ClassHash,
     pub sierra_program_hash: Felt,
     pub debug_info: DebugInfo,
+    /// Per Sierra statement, `(file, line, column)` — 1-based — or none.
+    pub locations: Vec<Option<(usize, u32, u32)>>,
+    /// Per file index: its stable path, and its text when the binding embeds it.
+    pub files: Vec<(String, Option<String>)>,
     /// The whole document, so a report can publish what it says about the build.
     pub doc: Value,
 }
@@ -51,6 +55,11 @@ pub struct Bound {
     pub function_at: BTreeMap<usize, String>,
     /// Whether any statement carries a Cairo file:line (Cairo 2.8+ builds only).
     pub code_locations: bool,
+    /// pc -> `(file, line, column)` for every pc whose statement has a location in a file
+    /// the binding embeds. A pc absent here stays on its CASM listing line.
+    pub pc_location: HashMap<usize, (usize, u32, u32)>,
+    /// The embedded files, by index: stable path and text.
+    pub files: Vec<(String, Option<String>)>,
     pub provenance: Value,
 }
 
@@ -101,7 +110,14 @@ fn entry_points(v: &Value) -> Result<BTreeMap<String, Vec<(Felt, u64)>>> {
 /// `bind-class`: compare a build with the chain's class and, only if every component
 /// agrees, write the binding. A disagreement is an error naming the component — the build
 /// is discarded (Source-Resolution §4, "No match"), not published with a caveat.
-pub fn bind(chain_class: &Path, built: &Path, class_hash: Felt, build: Value) -> Result<Value> {
+pub fn bind(
+    chain_class: &Path,
+    built: &Path,
+    class_hash: Felt,
+    build: Value,
+    roots: &[(String, PathBuf)],
+    embed: bool,
+) -> Result<Value> {
     let mut chain = read_json(chain_class)?;
     // A transcript answer is the JSON-RPC envelope; a bare class is accepted too.
     if let Some(r) = chain.get("result") {
@@ -181,6 +197,16 @@ pub fn bind(chain_class: &Path, built: &Path, class_hash: Felt, build: Value) ->
              (it does not change the Sierra program)"
         );
     }
+    // The names are kept; the tool annotations are not — they carry the build machine's
+    // absolute paths. Code locations are re-stated below in machine-independent form.
+    let mut names_only = debug.clone();
+    if let Some(o) = names_only.as_object_mut() {
+        o.remove("annotations");
+    }
+    let (locations, files) = match parsed.annotations.get(CODE_LOCATIONS) {
+        Some(a) => code_locations(a, cs_statements(&cs)?, roots, embed)?,
+        None => (Value::Null, Value::Null),
+    };
     Ok(json!({
         "format": FORMAT,
         "classHash": class_hash.to_hex_string(),
@@ -188,9 +214,145 @@ pub fn bind(chain_class: &Path, built: &Path, class_hash: Felt, build: Value) ->
         "compared": compared,
         "build": build,
         "functions": parsed.user_func_names.len(),
-        "codeLocations": parsed.annotations.contains_key(CODE_LOCATIONS),
-        "debugInfo": debug,
+        "codeLocations": !locations.is_null(),
+        "debugInfo": names_only,
+        "locations": locations,
+        "files": files,
     }))
+}
+
+/// How many statements the class's Sierra program has.
+fn cs_statements(sierra: &[Felt]) -> Result<usize> {
+    let cc = CairoLangContractClass {
+        sierra_program: sierra
+            .iter()
+            .map(|f| cairo_lang_utils::bigint::BigUintAsHex {
+                value: f.to_biguint(),
+            })
+            .collect(),
+        sierra_program_debug_info: None,
+        contract_class_version: String::new(),
+        entry_points_by_type: Default::default(),
+        abi: None,
+    };
+    Ok(cc
+        .extract_sierra_program(false)
+        .map_err(|e| eyre!("extract Sierra program: {e}"))?
+        .program
+        .statements
+        .len())
+}
+
+/// A build path, named so it means the same on every machine: under a `--root LABEL=DIR`
+/// it is `LABEL/<relative>`; in Scarb's cache it is the package and version it belongs to
+/// (`core@2.15.0/src/integer.cairo`, `openzeppelin_token@3.0.0/src/erc20/erc20.cairo`,
+/// `starkware-starknet-utils@8f41888/packages/…`). A path that is neither is refused:
+/// nothing machine-specific may reach a published binding.
+fn stable_path(p: &str, roots: &[(String, PathBuf)]) -> Result<String> {
+    for (label, dir) in roots {
+        if let Ok(rel) = Path::new(p).strip_prefix(dir) {
+            return Ok(format!("{label}/{}", rel.display()));
+        }
+    }
+    let after = |m: &str| p.find(m).map(|i| &p[i + m.len()..]);
+    if let Some(rest) = after("/registry/std/") {
+        // v2.15.0/core/src/x.cairo
+        let mut it = rest.splitn(3, '/');
+        if let (Some(v), Some(pkg), Some(tail)) = (it.next(), it.next(), it.next()) {
+            return Ok(format!("{pkg}@{}/{tail}", v.trim_start_matches('v')));
+        }
+    }
+    if let Some(rest) = after("/registry/src/") {
+        // <registry>/<pkg>-<ver>/x.cairo
+        let mut it = rest.splitn(3, '/');
+        if let (Some(_), Some(pv), Some(tail)) = (it.next(), it.next(), it.next()) {
+            if let Some((pkg, ver)) = pv.rsplit_once('-') {
+                return Ok(format!("{pkg}@{ver}/{tail}"));
+            }
+        }
+    }
+    if let Some(rest) = after("/registry/git/checkouts/") {
+        // <name>-<hash>/<rev>/x.cairo
+        let mut it = rest.splitn(3, '/');
+        if let (Some(nh), Some(rev), Some(tail)) = (it.next(), it.next(), it.next()) {
+            let name = nh.rsplit_once('-').map_or(nh, |(n, _)| n);
+            return Ok(format!("{name}@{rev}/{tail}"));
+        }
+    }
+    bail!("source path {p} is under no --root and not in Scarb's cache; name its root")
+}
+
+/// Per Sierra statement, the ONE Cairo location a step there is shown at, and the files
+/// those locations name.
+///
+/// A statement's locations are the inlining chain the compiler recorded, innermost first,
+/// each flagged when it is macro-generated. The location used is the innermost one that
+/// is not macro-generated — the code that actually emitted the statement — and, when
+/// every entry is generated, the innermost one. A statement with no location has `null`.
+///
+/// With `embed`, each named file's text is carried with its sha256, read from the build
+/// tree at bind time; without it only the sha256 is, and a trace positions on CASM.
+fn code_locations(
+    annotation: &Value,
+    statements: usize,
+    roots: &[(String, PathBuf)],
+    embed: bool,
+) -> Result<(Value, Value)> {
+    let map = annotation["statements_code_locations"]
+        .as_object()
+        .ok_or_else(|| eyre!("{CODE_LOCATIONS}: no statements_code_locations"))?;
+    let mut file_idx: BTreeMap<String, usize> = BTreeMap::new();
+    let mut file_abs: Vec<String> = vec![];
+    let mut out = vec![Value::Null; statements];
+    for (k, entries) in map {
+        let idx: usize = k.parse().map_err(|_| eyre!("statement index {k}"))?;
+        if idx >= statements {
+            bail!("a location for statement {idx}, past the program's {statements}");
+        }
+        let entries = entries.as_array().cloned().unwrap_or_default();
+        let pick = entries
+            .iter()
+            .find(|e| e[2] == Value::Bool(false))
+            .or_else(|| entries.first());
+        let Some(e) = pick else { continue };
+        let abs = e[0]
+            .as_str()
+            .ok_or_else(|| eyre!("a location without a file"))?;
+        let name = stable_path(abs, roots)?;
+        let n = file_idx.len();
+        let fi = *file_idx.entry(name).or_insert_with(|| {
+            file_abs.push(abs.to_string());
+            n
+        });
+        let start = &e[1]["start"];
+        // The compiler counts lines and columns from 0.
+        out[idx] = json!([
+            fi,
+            start["line"].as_u64().unwrap_or(0) + 1,
+            start["col"].as_u64().unwrap_or(0) + 1
+        ]);
+    }
+    let mut files = vec![];
+    for (name, i) in &file_idx {
+        let bytes = std::fs::read(&file_abs[*i])
+            .map_err(|e| eyre!("{}: {e} (the build tree must still exist)", file_abs[*i]))?;
+        let sha = sha256_hex(&bytes);
+        let mut f = json!({ "index": i, "path": name, "sha256": sha });
+        if embed {
+            f["text"] = json!(String::from_utf8(bytes)?);
+        }
+        files.push(f);
+    }
+    files.sort_by_key(|f| f["index"].as_u64());
+    Ok((Value::Array(out), Value::Array(files)))
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect()
 }
 
 const CODE_LOCATIONS: &str = "github.com/software-mansion/cairo-coverage";
@@ -212,11 +374,40 @@ pub fn load_dir(dir: &Path) -> Result<HashMap<ClassHash, Binding>> {
                 .ok_or_else(|| eyre!("{}: no {k}", p.display()))
         };
         let class_hash = ClassHash(hash("classHash")?);
+        let mut files = vec![];
+        for f in doc["files"].as_array().cloned().unwrap_or_default() {
+            let path = f["path"].as_str().unwrap_or("").to_string();
+            let text = f["text"].as_str().map(String::from);
+            // An embedded text is the file the build read, or it is not used.
+            if let Some(t) = &text {
+                if Some(sha256_hex(t.as_bytes()).as_str()) != f["sha256"].as_str() {
+                    bail!(
+                        "{}: the embedded {path} does not hash to its sha256",
+                        p.display()
+                    );
+                }
+            }
+            files.push((path, text));
+        }
+        let locations = doc["locations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|l| {
+                l.as_array().map(|a| {
+                    let n = |i: usize| a.get(i).and_then(|v| v.as_u64()).unwrap_or(0);
+                    (n(0) as usize, n(1) as u32, n(2) as u32)
+                })
+            })
+            .collect();
         let b = Binding {
             class_hash,
             sierra_program_hash: hash("sierraProgramHash")?,
             debug_info: serde_json::from_value(doc["debugInfo"].clone())
                 .map_err(|e| eyre!("{}: debugInfo: {e}", p.display()))?,
+            locations,
+            files,
             doc,
         };
         out.insert(class_hash, b);
@@ -281,13 +472,64 @@ pub fn apply(rec: &mut ClassRecord, b: &Binding) -> Result<Bound> {
             function_at.insert(st.start, name.to_string());
         }
     }
+    let mut pc_location = HashMap::new();
+    if !b.locations.is_empty() {
+        if b.locations.len() != rec.sierra_statements.len() {
+            bail!(
+                "class {}: the binding locates {} statements, the program has {}",
+                rec.class_hash,
+                b.locations.len(),
+                rec.sierra_statements.len()
+            );
+        }
+        for (st, loc) in rec.sierra_statements.iter().zip(&b.locations) {
+            if let Some(l) = loc {
+                if b.files.get(l.0).is_some_and(|f| f.1.is_some()) {
+                    for pc in st.start..st.end {
+                        pc_location.insert(pc, *l);
+                    }
+                }
+            }
+        }
+    }
     Ok(Bound {
         function_at,
-        code_locations: b.debug_info.annotations.contains_key(CODE_LOCATIONS),
+        code_locations: !b.locations.is_empty(),
+        pc_location,
+        files: b.files.clone(),
         provenance: json!({
             "classHash": b.doc["classHash"],
             "compared": b.doc["compared"],
             "build": b.doc["build"],
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_path_is_named_the_same_on_every_machine() {
+        let roots = vec![("repo".to_string(), PathBuf::from("/w/checkout"))];
+        let n = |p: &str| stable_path(p, &roots).unwrap();
+        assert_eq!(
+            n("/w/checkout/packages/a/src/x.cairo"),
+            "repo/packages/a/src/x.cairo"
+        );
+        assert_eq!(
+            n("/home/u/.cache/scarb/registry/std/v2.15.0/core/src/integer.cairo"),
+            "core@2.15.0/src/integer.cairo"
+        );
+        assert_eq!(
+            n("/c/registry/src/scarbs.xyz-9djtpev4jug5q/openzeppelin_token-3.0.0/src/erc20/erc20.cairo"),
+            "openzeppelin_token@3.0.0/src/erc20/erc20.cairo"
+        );
+        assert_eq!(
+            n("/c/registry/git/checkouts/starkware-starknet-utils-co5ag083kk1bq/8f41888/packages/utils/src/errors.cairo"),
+            "starkware-starknet-utils@8f41888/packages/utils/src/errors.cairo"
+        );
+        // CONTROL: a path under no root and outside Scarb's cache is refused, not leaked.
+        assert!(stable_path("/home/u/elsewhere/x.cairo", &roots).is_err());
+    }
 }
