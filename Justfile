@@ -274,3 +274,53 @@ onchain-lint:
 #   just onchain-trace-block 16664437 https://api.cartridge.gg/x/starknet/mainnet ./out
 onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
   onchain/target/release/codetracer-cairo-onchain trace-block {{BLOCK}} --rpc-url {{RPC}} -o {{OUT}} {{ARGS}}
+
+# ── The Voyager API key, sealed, never stored in the clear ────────────────────
+#
+# Starknet class sources (Recorder-Cairo CXP-CAIRO-4) come from Voyager, whose API
+# needs a key. It is handled the way metacraft-labs/infra handles every provider
+# credential: read from the terminal without echo, streamed straight into `age`, and
+# only the ciphertext is committed (onchain/secrets/voyager-api-key.age).
+#
+# RECIPIENTS are infra's committed, nix-derived recipient sets — the super-admins group
+# and high-mem-server, the host the pipeline is planned to run on — plus any EXTRA
+# `age1…` public keys given (e.g. an agent workstation's identity). RECIPIENTS points at
+# infra's `lib/recipients`, a sibling checkout by default.
+#
+#   just seal-voyager-api-key                       # then paste the key, Enter
+#   just seal-voyager-api-key ../infra/lib/recipients age14tyf…
+#
+# A run that needs the key decrypts it into the environment of that one process
+# (`just onchain-with-voyager-key <identity> -- <command>`); it is never written out.
+seal-voyager-api-key RECIPIENTS="../infra/lib/recipients" *EXTRA:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v age >/dev/null 2>&1 || { echo "age not on PATH." >&2; exit 1; }
+    r="{{RECIPIENTS}}"
+    for f in "$r/groups/super-admins.txt" "$r/hosts/high-mem-server.txt"; do
+      [ -s "$f" ] || { echo "no recipient set at $f — point RECIPIENTS at infra's lib/recipients." >&2; exit 1; }
+    done
+    args=(-R "$r/groups/super-admins.txt" -R "$r/hosts/high-mem-server.txt")
+    for k in {{EXTRA}}; do
+      case "$k" in age1*) args+=(-r "$k") ;; *) echo "extra recipient '$k' is not an age1… public key." >&2; exit 1 ;; esac
+    done
+    out="onchain/secrets/voyager-api-key.age"
+    if [ ! -t 0 ]; then exec </dev/tty; fi
+    echo "Paste the Voyager API key (input hidden), then press Enter." >&2
+    printf "Key: " >&2
+    IFS= read -r -s key; printf "\n" >&2
+    [ -n "$key" ] || { echo "Empty key; refusing to write $out." >&2; exit 1; }
+    mkdir -p "$(dirname "$out")"
+    tmp="$(mktemp "$out.tmp.XXXXXX")"
+    printf '%s' "$key" | age --encrypt "${args[@]}" --output "$tmp"
+    unset key
+    chmod 0644 "$tmp"; mv "$tmp" "$out"
+    echo "Sealed $out for $(( ${#args[@]} / 2 )) recipient argument(s). Commit it; it is ciphertext." >&2
+
+# Run one command with VOYAGER_API_KEY decrypted into ITS environment only.
+#   just onchain-with-voyager-key ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey -- <command…>
+onchain-with-voyager-key IDENTITY *CMD:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmd=({{CMD}}); [ "${cmd[0]:-}" = "--" ] && cmd=("${cmd[@]:1}")
+    VOYAGER_API_KEY="$(age --decrypt -i "{{IDENTITY}}" onchain/secrets/voyager-api-key.age)" exec "${cmd[@]}"
