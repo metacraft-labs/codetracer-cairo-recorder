@@ -609,7 +609,7 @@ fn control_the_same_bindings_without_their_texts_position_nothing_on_source() {
         .iter()
         .filter(|c| c["source"]["bound"] == true)
         .count();
-    assert_eq!(bound, 4, "names still apply without the texts");
+    assert_eq!(bound, 5, "names still apply without the texts");
 }
 
 #[test]
@@ -632,4 +632,21 @@ fn control_an_embedded_text_that_is_not_the_file_the_build_read_is_refused() {
         .unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("does not hash to its sha256"));
+}
+
+#[test]
+fn control_bind_class_refuses_a_build_whose_abi_renames_one_parameter() {
+    // What circlefin/stablecoin-starknet's public source does against mainnet's USDC
+    // class: the same Sierra program, but parameters named `to`/`from` where the deployed
+    // ABI says `recipient`/`sender` — a different revision of the source. Showing it would
+    // mislabel the parameters, so it is no match.
+    let mut built = matching_build();
+    let s = built["abi"].to_string();
+    let i = s.find("\"name\":\"").expect("an ABI names things");
+    let renamed = format!("{}\"name\":\"renamed_{}", &s[..i], &s[i + 8..]);
+    built["abi"] = serde_json::from_str(&renamed).unwrap();
+    let o = bind(&built, "bind-abi");
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("NO MATCH on the ABI"));
+    assert!(!scratch_path("bind-abi").join("out.json").exists());
 }
