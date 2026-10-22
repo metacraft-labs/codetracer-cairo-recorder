@@ -480,10 +480,11 @@ fn scratch_path(name: &str) -> PathBuf {
 //
 // The two StarkGate v3.0.0 token classes this block's transaction moves (STRK, ETH;
 // starknet-io/starkgate-contracts @ 07e11c3, Apache-2.0, Scarb 2.15.1) are bound from a
-// build with `add-statements-code-locations-debug-info`, with `--embed-sources`. Ekubo
-// Core (EkuboProtocol/starknet-contracts v5.0.3, Scarb 2.20.0) is bound from such a build
-// too but WITHOUT its sources — its licence reserves distribution — so it is the in-run
-// control: located, named, and still positioned on CASM.
+// build with `add-statements-code-locations-debug-info`, with `--embed-sources`; so is
+// Ekubo Core (EkuboProtocol/starknet-contracts v5.0.3, Scarb 2.20.0,
+// LicenseRef-Ekubo-Proprietary — republished with its SPDX identifier by operator
+// decision, 2026-10-22). The Argent account and Ekubo's Router are names only (Cairo
+// 2.6.3 records no locations), and USDC is unbound: those steps stay on CASM.
 
 const STRK: &str = "0x2e77ee61d4df3d988ee1f42ea5442e913862cc82c2584d212ecda76666498fc";
 const EKUBO_CORE: &str = "0x423df19e032f2d9bf9bb5bc1ea96db2b06d4c752c8c130cba7d577eed1de20a";
@@ -503,23 +504,25 @@ fn steps_in_a_class_with_embedded_sources_are_on_cairo_lines() {
     let out = scratch("cairo-lines");
     run_with_sources(&sources(), &out);
     let r = container_report(&out);
-    assert_eq!(r["container"]["cairoSteps"], 1197, "{:#}", r["container"]);
+    assert_eq!(r["container"]["cairoSteps"], 11162, "{:#}", r["container"]);
     let files: Vec<&str> = r["container"]["cairoSources"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(files.len(), 13, "only files a step is shown in: {files:?}");
+    assert_eq!(files.len(), 42, "only files a step is shown in: {files:?}");
     assert!(files.contains(&ERC20));
     assert!(files
         .contains(&"./sources/cairo/starkgate-contracts/packages/strk/src/erc20_lockable.cairo"));
-    assert!(
-        files
-            .iter()
-            .all(|f| !f.contains("ekubo") && !f.starts_with("./sources/cairo/starknet-contracts")),
-        "a binding without embedded sources positions nothing on source: {files:?}"
-    );
+    assert!(files.contains(&"./sources/cairo/starknet-contracts/src/core.cairo"));
+    // Two builds, two corelibs: each class's steps are in its own compiler's corelib.
+    assert!(files
+        .iter()
+        .any(|f| f.starts_with("./sources/cairo/core@2.15.0/")));
+    assert!(files
+        .iter()
+        .any(|f| f.starts_with("./sources/cairo/core@2.20.0/")));
     // The file written beside the container is the text the build read.
     let binding = gz_json(&sources().join(format!("{STRK}.json.gz")));
     let embedded = binding["files"]
@@ -544,7 +547,11 @@ fn steps_in_a_class_with_embedded_sources_are_on_cairo_lines() {
         .clone();
     assert_eq!(core["source"]["bound"], true);
     assert_eq!(core["source"]["codeLocations"], true);
-    assert_eq!(core["cairoSources"].as_array().unwrap().len(), 0);
+    assert!(core["cairoSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|v| !v.as_str().unwrap().contains("starkgate-contracts")));
     // Per class, the files its own steps landed in — together, exactly the container's.
     let mut union: Vec<String> = r["classes"]
         .as_array()
