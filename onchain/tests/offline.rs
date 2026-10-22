@@ -657,3 +657,42 @@ fn control_bind_class_refuses_a_build_whose_abi_renames_one_parameter() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("NO MATCH on the ABI"));
     assert!(!scratch_path("bind-abi").join("out.json").exists());
 }
+
+// ── An L1-initiated transaction (Recorder-Cairo CXP-CAIRO-4's awkward cases) ──────────
+//
+// Mainnet block 16,752,201 (Starknet 0.14.4) holds two transactions: index 0 is an
+// L1_HANDLER — a StarkGate ETH deposit, started by a message from the L1 bridge
+// 0xae0ee0a6…d419, with no Starknet sender at all — and index 1 an ordinary INVOKE.
+// Committed transcript recorded 2026-10-22 from api.cartridge.gg.
+
+#[test]
+fn an_l1_handler_block_reproduces_from_its_transcript() {
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mainnet-16752201");
+    let out = scratch("l1h");
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["trace-block", "16752201", "--transcript-in"])
+        .arg(&fx)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let b: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("block.json")).unwrap()).unwrap();
+    assert_eq!(b["transactions"], 2);
+    assert_eq!(b["replayed"], 2, "{b:#}");
+    for k in ["storageEntries", "nonces", "classHashes"] {
+        assert_eq!(b["blockStateDiff"][k]["matches"], true, "{k}");
+    }
+    let rows = b["perTransaction"].as_array().unwrap();
+    let l1 = &rows[0];
+    assert_eq!(
+        l1["txHash"],
+        "0x677215c36be163338b1da157a5b02d0330ed75ea1a09723de810507b183600b"
+    );
+    assert_eq!(l1["outcome"], "replayed");
+    assert_eq!(l1["vm"]["steps"], 1076);
+    // CONTROL: the INVOKE beside it reproduces through the same path.
+    assert_eq!(rows[1]["outcome"], "replayed");
+    assert_eq!(rows[1]["vm"]["steps"], 9831);
+}
