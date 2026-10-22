@@ -696,3 +696,64 @@ fn an_l1_handler_block_reproduces_from_its_transcript() {
     assert_eq!(rows[1]["outcome"], "replayed");
     assert_eq!(rows[1]["vm"]["steps"], 9831);
 }
+
+// ── A class upgrade, and a block inside the documented hole ──────────────────────────
+//
+// Mainnet block 16,625,884 (18 transactions): index 0 upgrades account 0x6d626c63…e867 to
+// Argent 0.4.0 (0x3607…927f) through `replace_class`; no other transaction changes a class.
+// Mainnet block 1,948,151 (5 transactions) lies inside Chain-Support-Matrix §1.3's
+// documented ~9,000-block hole, which this pipeline measured as no hole (CXP-CAIRO-1).
+// Both transcripts recorded 2026-10-22 from api.cartridge.gg.
+
+fn trace_fixture(name: &str, block: &str) -> Value {
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let out = scratch(name);
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["trace-block", block, "--transcript-in"])
+        .arg(&fx)
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    serde_json::from_str(&std::fs::read_to_string(out.join("block.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn an_upgrade_is_reproduced_and_named_on_its_own_transaction() {
+    let b = trace_fixture("mainnet-16625884", "16625884");
+    assert_eq!(
+        (b["transactions"].as_u64(), b["replayed"].as_u64()),
+        (Some(18), Some(18)),
+        "{b:#}"
+    );
+    assert_eq!(b["blockStateDiff"]["classHashes"]["matches"], true);
+    let rows = b["perTransaction"].as_array().unwrap();
+    assert_eq!(
+        rows[0]["classChanges"],
+        serde_json::json!([{
+            "contract": "0x6d626c63a40c7ed17053baed7c19ef03b6bb41a491fa0e71cf2d1871b4ce867",
+            "classHash": "0x36078334509b514626504edc9fb252328d1a240e4e948bef8d0c08dff45927f",
+            "kind": "replaced",
+        }])
+    );
+    // CONTROL: every other transaction of the block changed no class.
+    for r in &rows[1..] {
+        assert_eq!(r["classChanges"], serde_json::json!([]), "{}", r["txHash"]);
+    }
+}
+
+#[test]
+fn a_block_inside_the_documented_hole_reproduces() {
+    let b = trace_fixture("mainnet-1948151", "1948151");
+    assert_eq!(
+        (b["transactions"].as_u64(), b["replayed"].as_u64()),
+        (Some(5), Some(5)),
+        "{b:#}"
+    );
+    for k in ["storageEntries", "nonces", "classHashes"] {
+        assert_eq!(b["blockStateDiff"][k]["matches"], true, "{k}");
+    }
+}

@@ -677,6 +677,30 @@ fn trace_block(
                     "stateDiff.classHashes": { "published": tc.len(), "replayed": oc.len(), "matches": tc == oc },
                     "l2Gas": trace_root["execution_resources"]["l2_gas"],
                 });
+                // WHICH CONTRACTS THIS TRANSACTION GAVE A CLASS, from the REPLAY's own
+                // state diff (an upgrade's `replace_class`, a deployment). The replay
+                // cannot tell the two apart from the class map alone, so `kind` is taken
+                // from the node's trace for the same address — and stated only when the
+                // trace gives that address the SAME class, never borrowed for a class the
+                // replay did not set. Consensus on the classes is the block diff above.
+                let kind_of = |k: &str, a: &Felt, c: &Felt| {
+                    trace_root["state_diff"][k].as_array().is_some_and(|l| {
+                        l.iter().any(|d| {
+                            fh(&d["contract_address"]).or_else(|| fh(&d["address"])) == Some(*a)
+                                && fh(&d["class_hash"]) == Some(*c)
+                        })
+                    })
+                };
+                report["classChanges"] = json!(oc
+                    .iter()
+                    .map(|(a, c)| json!({
+                        "contract": a.to_hex_string(),
+                        "classHash": c.to_hex_string(),
+                        "kind": if kind_of("replaced_classes", a, c) { json!("replaced") }
+                                else if kind_of("deployed_contracts", a, c) { json!("deployed") }
+                                else { Value::Null },
+                    }))
+                    .collect::<Vec<_>>());
                 // The call tree, entry point by entry point.
                 let theirs = trace_calls(&trace_root);
                 // A REVERTED TRANSACTION'S TRACE HAS NO EXECUTE TREE: the node replaces
