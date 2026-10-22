@@ -243,3 +243,233 @@ fn control_a_mutated_call_tree_is_caught_by_the_differential() {
     assert_eq!(bad, vec!["callTree"]);
     assert_eq!(b["blockStateDiff"]["storageEntries"]["matches"], true);
 }
+
+// ── Source binding (Recorder-Cairo CXP-CAIRO-4) ─────────────────────────────────────
+//
+// `tests/fixtures/class-sources/` holds ONE binding, written by `bind-class` from a build
+// of argentlabs/argent-contracts-starknet @ account-0.4.0 (1352198956) with Scarb 2.6.3:
+// the account class this block's transaction validates and executes through. The build
+// itself (2 MB) is not committed; the tests below rebuild an equivalent document from the
+// chain's own answer plus the binding's debug info, which is exactly what a matching
+// build is. To reproduce the binding: check out the tag, append
+//     [profile.srcmap]          inherits = "release"
+//     [profile.srcmap.cairo]    sierra-replace-ids = true
+// to Scarb.toml (names only — the Sierra program is unchanged, which `bind-class` checks),
+// `scarb --profile srcmap build` with Scarb 2.6.3 (the repo's .tool-versions), then
+//     codetracer-cairo-onchain bind-class <class> --chain-class <getClass answer> \
+//       --built target/srcmap/argent_ArgentAccount.contract_class.json --build k=v… -o …
+
+const ACCOUNT: &str = "0x36078334509b514626504edc9fb252328d1a240e4e948bef8d0c08dff45927f";
+
+fn sources() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/class-sources")
+}
+
+fn gz_json(p: &Path) -> Value {
+    use std::io::Read;
+    let mut s = String::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(p).unwrap())
+        .read_to_string(&mut s)
+        .unwrap();
+    serde_json::from_str(&s).unwrap()
+}
+
+fn binding_file() -> PathBuf {
+    sources().join(format!("{ACCOUNT}.json.gz"))
+}
+
+/// The chain's `getClass` answer for the account class, from the transcript.
+fn chain_class_file() -> PathBuf {
+    let idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture().join("index.json")).unwrap())
+            .unwrap();
+    let key = idx["answers"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k.starts_with("starknet_getClass ") && k.contains(&ACCOUNT[2..]))
+        .map(|(_, v)| v.as_str().unwrap().to_string())
+        .expect("the transcript holds the account class");
+    fixture().join("answers").join(key)
+}
+
+fn class_rows(out: &Path) -> Vec<Value> {
+    let r: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join(TX).join("report.json")).unwrap())
+            .unwrap();
+    assert_eq!(r["outcome"], "replayed", "a binding never changes what ran");
+    assert_eq!(r["vm"]["steps"], 18902);
+    r["classes"].as_array().unwrap().clone()
+}
+
+fn listing(out: &Path) -> String {
+    std::fs::read_to_string(out.join(TX).join("sources").join(format!("{ACCOUNT}.casm"))).unwrap()
+}
+
+fn run_with_sources(dir: &Path, out: &Path) {
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["trace-block", BLOCK, "--transcript-in"])
+        .arg(fixture())
+        .arg("-o")
+        .arg(out)
+        .arg("--class-sources")
+        .arg(dir)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
+fn a_bound_class_is_listed_with_its_build_names() {
+    let plain = scratch("src-plain");
+    run(&fixture(), &plain, &[]);
+    let bound = scratch("src-bound");
+    run_with_sources(&sources(), &bound);
+
+    let row = class_rows(&bound)
+        .into_iter()
+        .find(|c| c["classHash"] == ACCOUNT.replacen("0x0", "0x", 1))
+        .expect("the account class ran");
+    assert_eq!(row["source"]["bound"], true, "{row:#}");
+    assert_eq!(row["source"]["functionsNamed"], 198);
+    assert_eq!(
+        row["source"]["codeLocations"], false,
+        "Cairo 2.6.3 records no file:line"
+    );
+    assert_eq!(row["source"]["provenance"]["build"]["tag"], "account-0.4.0");
+    for c in class_rows(&bound) {
+        if c["classHash"] != row["classHash"] {
+            assert!(
+                c["source"].is_null(),
+                "only the bound class says it is: {c:#}"
+            );
+        }
+    }
+
+    // Every call target the plain listing could only name by pc is named by the build.
+    let (p, b) = (listing(&plain), listing(&bound));
+    assert_eq!(p.matches("\nfn@0x").count(), 148);
+    assert_eq!(b.matches("\nfn@0x").count(), 0);
+    assert!(b.contains(
+        "\nargent::presets::argent_account::ArgentAccount::__wrapper__AccountImpl____validate__:\n"
+    ));
+    assert!(b.contains(
+        "function_call<user@argent::presets::argent_account::ArgentAccount::AccountImpl::__validate__>"
+    ));
+    // Same instructions at the same pcs: the binding adds names, never code.
+    let ins = |s: &str| {
+        s.lines()
+            .filter(|l| l.starts_with("0x"))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ins(&p), ins(&b));
+}
+
+#[test]
+fn control_a_binding_for_another_program_is_refused_and_not_applied() {
+    // The same binding with its Sierra program hash changed in the last digit: what a
+    // binding of a different build of this class would carry.
+    let dir = scratch("src-tampered");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut doc = gz_json(&binding_file());
+    let h = doc["sierraProgramHash"].as_str().unwrap().to_string();
+    let last = h.chars().last().unwrap();
+    let flipped = format!(
+        "{}{}",
+        &h[..h.len() - 1],
+        if last == '0' { '1' } else { '0' }
+    );
+    doc["sierraProgramHash"] = Value::String(flipped);
+    std::fs::write(dir.join(format!("{ACCOUNT}.json")), doc.to_string()).unwrap();
+
+    let plain = scratch("src-plain2");
+    run(&fixture(), &plain, &[]);
+    let out = scratch("src-tampered-out");
+    run_with_sources(&dir, &out);
+    let row = class_rows(&out)
+        .into_iter()
+        .find(|c| !c["source"].is_null())
+        .expect("the refusal is reported");
+    assert_eq!(row["source"]["bound"], false);
+    assert!(
+        row["source"]["refused"]
+            .as_str()
+            .unwrap()
+            .contains("the binding is for Sierra program"),
+        "{row:#}"
+    );
+    assert_eq!(
+        listing(&out),
+        listing(&plain),
+        "a refused binding changes nothing"
+    );
+}
+
+fn bind(built: &Value, name: &str) -> std::process::Output {
+    let d = scratch(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let built_path = d.join("built.json");
+    std::fs::write(&built_path, built.to_string()).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["bind-class", ACCOUNT, "--chain-class"])
+        .arg(chain_class_file())
+        .arg("--built")
+        .arg(&built_path)
+        .args(["--build", "what=test"])
+        .arg("-o")
+        .arg(d.join("out.json"))
+        .output()
+        .unwrap()
+}
+
+/// A build document equivalent to a matching build: the chain's own class, its ABI as
+/// JSON, and the committed binding's debug info.
+fn matching_build() -> Value {
+    let mut chain = gz_json(&chain_class_file());
+    if let Some(r) = chain.get("result") {
+        chain = r.clone();
+    }
+    let abi: Value = serde_json::from_str(chain["abi"].as_str().unwrap()).unwrap();
+    chain["abi"] = abi;
+    chain["sierra_program_debug_info"] = gz_json(&binding_file())["debugInfo"].clone();
+    chain
+}
+
+#[test]
+fn bind_class_binds_a_matching_build() {
+    let o = bind(&matching_build(), "bind-ok");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(scratch_path("bind-ok").join("out.json")).unwrap(),
+    )
+    .unwrap();
+    let committed = gz_json(&binding_file());
+    assert_eq!(doc["sierraProgramHash"], committed["sierraProgramHash"]);
+    assert_eq!(doc["compared"], committed["compared"]);
+}
+
+#[test]
+fn control_bind_class_refuses_one_changed_sierra_felt() {
+    let mut built = matching_build();
+    let felts = built["sierra_program"].as_array_mut().unwrap();
+    let (n, i) = (felts.len(), felts.len() / 2);
+    felts[i] = Value::String("0x1234".into());
+    let o = bind(&built, "bind-bad");
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains(&format!("NO MATCH on the Sierra program: chain {n} felts"))
+            && err.contains(&format!("felt {i}")),
+        "{err}"
+    );
+    assert!(
+        !scratch_path("bind-bad").join("out.json").exists(),
+        "a refusal writes nothing"
+    );
+}
+
+/// `scratch` without the wipe, for reading what a step wrote.
+fn scratch_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("ct-cairo-onchain-{}-{name}", std::process::id()))
+}

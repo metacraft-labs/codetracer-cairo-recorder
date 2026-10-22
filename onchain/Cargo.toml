@@ -22,6 +22,7 @@ codetracer_trace_types = { path = "../../codetracer-trace-format/codetracer_trac
 codetracer_trace_writer_nim = { path = "../../codetracer-trace-format/codetracer_trace_writer_nim" }
 blockifier = { version = "=0.20.0-rc.1", features = ["tracing", "reexecution"] }
 starknet_api = "=0.20.0-rc.1"
+cairo-lang-sierra = "=2.19.5"
 cairo-lang-starknet-classes = "=2.19.5"
 cairo-lang-utils = "=2.19.5"
 cairo-vm = "=3.2.0"

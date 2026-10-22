@@ -1476,6 +1476,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blockifier",
+ "cairo-lang-sierra",
  "cairo-lang-starknet-classes",
  "cairo-lang-utils",
  "cairo-vm",

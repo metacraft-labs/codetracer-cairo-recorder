@@ -7,7 +7,8 @@
 //! instruction it executed, and not at a source line, until verified sources are
 //! resolved for the class (Recorder-Cairo CXP-CAIRO-4). The listing is built out of the
 //! bytecode itself, so it needs nothing recovered from anywhere, and every position in
-//! the recording points into it.
+//! the recording points into it. A class with a proved build (`source.rs`) is listed
+//! with the build's names — functions, types, libfuncs — over the same instructions.
 //!
 //! Lines that do not start with `0x` are LABELS (an entry point, a function a `call`
 //! instruction targets) and no step is ever placed on one.
@@ -21,6 +22,7 @@ use cairo_vm::vm::decoding::decoder::decode_instruction;
 use serde_json::Value;
 use starknet_types_core::felt::Felt;
 
+use crate::source::Bound;
 use crate::state::ClassRecord;
 
 pub struct Listing {
@@ -133,7 +135,7 @@ pub fn abi_names(abi: &Value) -> HashMap<Felt, String> {
     out
 }
 
-pub fn build(rec: &ClassRecord) -> Listing {
+pub fn build(rec: &ClassRecord, bound: Option<&Bound>) -> Listing {
     let names = abi_names(&rec.abi);
     let (words, entry_points, cairo0): (Vec<Felt>, Vec<(usize, Felt, String)>, bool) =
         if let Some(casm) = &rec.casm {
@@ -252,16 +254,20 @@ pub fn build(rec: &ClassRecord) -> Listing {
             selector.to_hex_string()
         ));
     }
+    // A bound build names Cairo 1 functions by their source names, at the CASM offset
+    // each one's code starts at; a call target it does not name keeps its pc name.
+    let bound_names = bound.map(|b| &b.function_at);
     let mut function_at = BTreeMap::new();
     for t in &targets {
         let name = cairo0_names
             .get(t)
+            .or_else(|| bound_names.and_then(|m| m.get(t)))
             .cloned()
             .unwrap_or_else(|| format!("fn@0x{t:04x}"));
         function_at.insert(*t, name.clone());
         labels.entry(*t).or_default().push(format!("{name}:"));
     }
-    for (pc, name) in &cairo0_names {
+    for (pc, name) in cairo0_names.iter().chain(bound_names.into_iter().flatten()) {
         if !targets.contains(pc) {
             labels.entry(*pc).or_default().push(format!("{name}:"));
             function_at.entry(*pc).or_insert_with(|| name.clone());

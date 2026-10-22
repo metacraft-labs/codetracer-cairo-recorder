@@ -26,6 +26,7 @@ mod block;
 mod listing;
 mod record;
 mod rpc;
+mod source;
 mod state;
 mod transcript;
 
@@ -75,6 +76,31 @@ enum Command {
         /// Also measure the lowest block this pipeline can replay (see `probe_floor`).
         #[arg(long)]
         probe_floor: bool,
+        /// A directory of `bind-class` bindings: a class that ran and has one there is
+        /// listed with its build's function, type and libfunc names.
+        #[arg(long)]
+        class_sources: Option<PathBuf>,
+    },
+    /// Prove a build of a class's source against the chain's own class, and write the
+    /// binding a trace applies. Refuses — writes nothing — unless the Sierra program,
+    /// entry points, class version and ABI all agree and the chain's answer hashes to the
+    /// class hash.
+    BindClass {
+        /// The class hash, as the chain names it.
+        class_hash: String,
+        /// The chain's `starknet_getClass` answer (JSON, or a transcript's `.json.gz`).
+        #[arg(long)]
+        chain_class: PathBuf,
+        /// The build's `<package>_<contract>.contract_class.json`, built with
+        /// `sierra-replace-ids = true` so its debug info names the program.
+        #[arg(long)]
+        built: PathBuf,
+        /// What the build was: `key=value`, repeated (repository, revision, toolchain, …).
+        /// Published verbatim beside the binding.
+        #[arg(long = "build")]
+        build: Vec<String>,
+        #[arg(short = 'o', long)]
+        out: PathBuf,
     },
 }
 
@@ -88,7 +114,12 @@ fn main() -> Result<()> {
             transcript_out,
             transcript_in,
             probe_floor,
+            class_sources,
         } => {
+            let sources = match &class_sources {
+                Some(d) => source::load_dir(d)?,
+                None => HashMap::new(),
+            };
             let rpc = match (&transcript_in, &rpc_url) {
                 (Some(p), _) => {
                     let (label, t) = transcript::read(p)?;
@@ -97,12 +128,49 @@ fn main() -> Result<()> {
                 (None, Some(u)) => rpc::Rpc::new(u),
                 (None, None) => bail!("--rpc-url or --transcript-in is required"),
             };
-            let r = trace_block(&rpc, block, &out_dir, &txs, probe_floor);
+            let r = trace_block(&rpc, block, &out_dir, &txs, probe_floor, &sources);
             if let Some(p) = transcript_out {
                 let n = transcript::write(&p, rpc.url(), &rpc.transcript())?;
                 eprintln!("transcript: {n} answer(s) -> {}", p.display());
             }
             r
+        }
+        Command::BindClass {
+            class_hash,
+            chain_class,
+            built,
+            build,
+            out,
+        } => {
+            let h = Felt::from_hex(&class_hash).map_err(|e| eyre!("class hash: {e}"))?;
+            let mut b = serde_json::Map::new();
+            for kv in &build {
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| eyre!("--build {kv}: expected key=value"))?;
+                b.insert(k.to_string(), json!(v));
+            }
+            let doc = source::bind(&chain_class, &built, h, Value::Object(b))?;
+            let text = serde_json::to_string(&doc)?;
+            if out.extension().is_some_and(|x| x == "gz") {
+                use std::io::Write;
+                let mut gz = flate2::write::GzEncoder::new(
+                    std::fs::File::create(&out)?,
+                    flate2::Compression::best(),
+                );
+                gz.write_all(text.as_bytes())?;
+                gz.finish()?;
+            } else {
+                std::fs::write(&out, text)?;
+            }
+            eprintln!(
+                "bound {}: {} functions named, {} -> {}",
+                doc["classHash"].as_str().unwrap_or(""),
+                doc["functions"],
+                doc["compared"]["sierraProgram"].as_str().unwrap_or(""),
+                out.display()
+            );
+            Ok(())
         }
     }
 }
@@ -244,6 +312,7 @@ fn trace_block(
     out_dir: &Path,
     wanted: &[String],
     probe: bool,
+    sources: &HashMap<starknet_api::core::ClassHash, source::Binding>,
 ) -> Result<()> {
     if number == 0 {
         bail!("block 0 has no parent block to read a prestate at");
@@ -695,7 +764,7 @@ fn trace_block(
             if listings.contains_key(&f.class_hash) {
                 continue;
             }
-            let rec = classes
+            let mut rec = classes
                 .borrow()
                 .get(&f.class_hash)
                 .cloned()
@@ -706,7 +775,24 @@ fn trace_block(
                         f.class_hash
                     )
                 })?;
-            let l = listing::build(&rec);
+            // A binding is applied only after it re-proves itself against the class that
+            // ran; one that does not is reported and the class is listed without it.
+            let (bound, source_row) = match sources.get(&f.class_hash) {
+                None => (None, Value::Null),
+                Some(b) => match source::apply(&mut rec, b) {
+                    Ok(bd) => {
+                        let row = json!({
+                            "bound": true,
+                            "functionsNamed": bd.function_at.len(),
+                            "codeLocations": bd.code_locations,
+                            "provenance": bd.provenance,
+                        });
+                        (Some(bd), row)
+                    }
+                    Err(e) => (None, json!({ "bound": false, "refused": e.to_string() })),
+                },
+            };
+            let l = listing::build(&rec, bound.as_ref());
             let p = src.join(format!("{}.casm", f.class_hash.0.to_hex_string()));
             std::fs::write(&p, &l.text)?;
             class_rows.push(json!({
@@ -716,6 +802,7 @@ fn trace_block(
                 "instructions": l.instructions,
                 "listing": format!("sources/{}.casm", f.class_hash.0.to_hex_string()),
                 "sierraVersion": rec.sierra_version.as_ref().map(|v| v.to_string()),
+                "source": source_row,
             }));
             abis.insert(f.class_hash, rec.abi.clone());
             paths.insert(
