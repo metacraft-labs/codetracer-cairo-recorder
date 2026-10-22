@@ -268,6 +268,16 @@ pub fn build(rec: &ClassRecord) -> Listing {
         }
     }
 
+    // The Sierra statement each CASM range implements, as a label line before the range's
+    // first instruction — `// sierra #<idx>: <statement>`. Steps stay on instruction lines.
+    for (idx, st) in rec.sierra_statements.iter().enumerate() {
+        if st.end > st.start {
+            labels
+                .entry(st.start)
+                .or_default()
+                .push(format!("// sierra #{idx}: {}", st.text));
+        }
+    }
     let mut text = String::new();
     let mut pc_line = HashMap::new();
     let mut line = 0u32;

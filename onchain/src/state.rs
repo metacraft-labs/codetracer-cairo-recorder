@@ -49,6 +49,17 @@ pub struct ClassRecord {
     pub abi: Value,
     /// Raw `getClass` answer — the sierra program felts are needed for the Sierra listing.
     pub raw: Value,
+    /// Per Sierra statement, in statement order: the CASM bytecode range it compiled to and
+    /// its text. From the SAME compilation that produced `casm`, so a pc maps to the
+    /// statement it implements exactly. Empty for a Cairo 0 class.
+    pub sierra_statements: Vec<SierraStatement>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SierraStatement {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
 }
 
 /// The classes a run loaded, shared so the recorder can still read them after the
@@ -320,9 +331,40 @@ pub fn class_from_rpc(class_hash: ClassHash, raw: Value) -> Result<ClassRecord> 
         program
             .validate_version_compatible(ListSelector::ListName("all".to_string()))
             .map_err(|e| eyre!("class {class_hash}: Sierra version validation: {e}"))?;
-        let casm =
-            CasmContractClass::from_contract_class(for_compilation, program, true, usize::MAX)
-                .map_err(|e| eyre!("class {class_hash}: Sierra -> CASM: {e}"))?;
+        let sierra_program = program.program.clone();
+        let (casm, debug) = CasmContractClass::from_contract_class_with_debug_info(
+            for_compilation,
+            program,
+            true,
+            usize::MAX,
+        )
+        .map_err(|e| eyre!("class {class_hash}: Sierra -> CASM: {e}"))?;
+        // A declared class carries no debug names, so a concrete libfunc prints as `[N]`;
+        // its declaration's long id (`felt252_add`, `store_temp<[3]>`, …) is the readable
+        // name, and it is in the class itself.
+        let names: HashMap<String, String> = sierra_program
+            .libfunc_declarations
+            .iter()
+            .map(|d| (d.id.to_string(), d.long_id.to_string()))
+            .collect();
+        let sierra_statements = debug
+            .sierra_statement_info
+            .iter()
+            .zip(sierra_program.statements.iter())
+            .map(|(info, st)| {
+                let mut text = st.to_string();
+                if let Some(end) = text.find('(') {
+                    if let Some(n) = names.get(&text[..end]) {
+                        text = format!("{n}{}", &text[end..]);
+                    }
+                }
+                SierraStatement {
+                    start: info.start_offset,
+                    end: info.end_offset,
+                    text,
+                }
+            })
+            .collect();
         let abi = raw
             .get("abi")
             .and_then(|a| a.as_str())
@@ -335,6 +377,7 @@ pub fn class_from_rpc(class_hash: ClassHash, raw: Value) -> Result<ClassRecord> 
             deprecated: None,
             abi,
             raw,
+            sierra_statements,
         })
     } else {
         let program_b64 = raw["program"]
@@ -381,6 +424,7 @@ pub fn class_from_rpc(class_hash: ClassHash, raw: Value) -> Result<ClassRecord> 
             }),
             abi,
             raw,
+            sierra_statements: vec![],
         })
     }
 }
