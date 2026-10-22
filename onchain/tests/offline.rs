@@ -544,6 +544,42 @@ fn steps_in_a_class_with_embedded_sources_are_on_cairo_lines() {
         .clone();
     assert_eq!(core["source"]["bound"], true);
     assert_eq!(core["source"]["codeLocations"], true);
+    assert_eq!(core["cairoSources"].as_array().unwrap().len(), 0);
+    // Per class, the files its own steps landed in — together, exactly the container's.
+    let mut union: Vec<String> = r["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|c| {
+            c["cairoSources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+        })
+        .collect();
+    union.sort();
+    union.dedup();
+    let mut all: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+    all.sort();
+    assert_eq!(union, all);
+    let strk = r["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["classHash"] == STRK)
+        .unwrap()
+        .clone();
+    assert!(strk["cairoSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str().unwrap().ends_with("erc20_lockable.cairo")));
+    assert!(!strk["cairoSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str().unwrap().ends_with("erc20_mintable.cairo")));
 }
 
 #[test]

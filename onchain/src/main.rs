@@ -915,6 +915,25 @@ fn trace_block(
                     .filter_map(move |s| at.and_then(|m| m.get(&s.pc)).map(|x| &x.0))
             })
             .collect();
+        // And per class, the files ITS steps are shown in, so a source bundle keyed by
+        // class carries exactly those (a corelib file two classes ran is in both).
+        let mut used_by: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for f in &e.frames {
+            if let Some(at) = cairo_at.get(&f.class_hash) {
+                for s in &f.steps {
+                    if let Some((p, _)) = at.get(&s.pc) {
+                        used_by
+                            .entry(f.class_hash.0.to_hex_string())
+                            .or_default()
+                            .insert(p.display().to_string());
+                    }
+                }
+            }
+        }
+        for row in class_rows.iter_mut() {
+            let h = row["classHash"].as_str().unwrap_or("").to_string();
+            row["cairoSources"] = json!(used_by.get(&h).cloned().unwrap_or_default());
+        }
         let mut cairo_files = vec![];
         for (interned, text) in cairo_texts.iter().filter(|(p, _)| used.contains(p)) {
             let on_disk = dir.join(interned);
