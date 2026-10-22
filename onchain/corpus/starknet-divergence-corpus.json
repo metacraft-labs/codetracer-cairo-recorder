@@ -1,0 +1,442 @@
+{
+ "format": "codetracer-cairo-onchain/divergence-corpus@1",
+ "chain": "starknet-mainnet",
+ "taxonomy": "codetracer-pm spec/Testing/Blockchain-Recorder-Test-Suites.md \u00a74; the selection rule is \u00a77",
+ "measuredBy": "tests/offline.rs the_divergence_corpus_covers_exactly_what_it_declares \u2014 every measurable cell is recomputed from the replays and must equal this file",
+ "cases": "`<block>:<txIndex>` for transactions, `<block>` for eras, a class hash for 4.10/sierra/*",
+ "fixtures": [
+  "tests/fixtures/mainnet-16664301",
+  "tests/fixtures/mainnet-16752201",
+  "tests/fixtures/mainnet-16625884",
+  "tests/fixtures/mainnet-1948151",
+  "tests/fixtures/mainnet-800008",
+  "tests/fixtures/mainnet-1014529"
+ ],
+ "report": {
+  "highestOracleTier": "1 \u2014 every receipt fact the recorder counts (status, fee, gas vector, events, L2->L1 messages, call tree) \u2014 plus each block's whole state diff equal to the node's starknet_getStateUpdate. Tiers 2 and 3 (the header's receipt and state commitments) are not computed.",
+  "fidelityLevelsAsserted": "per class, by the class-source tests: names (Cairo 2.6.3 builds), names + Cairo lines (builds with statement locations and republished sources), CASM only (unbound)",
+  "productionDivergenceRate": "blocktracer tools/chain/measurements/starknet-replay-yield.json: 690 of 690 in range reproduced; 0 divergent",
+  "lastCanary": "none \u2014 no canary replay on an executor upgrade has been run (\u00a76)",
+  "eraSample": "mainnet versions sampled every 25,000 blocks from 501,514 to 16,770,646 on 2026-10-22 via api.cartridge.gg"
+ },
+ "cells": {
+  "4.1/below-the-executor-floor": {
+   "cases": [],
+   "uncovered": "SYNTHETIC only: test a_block_of_an_era_the_executor_does_not_carry_is_refused_by_name rewrites a header to 0.12.3 and asserts every row is refused by name; no captured below-floor block is pinned"
+  },
+  "4.1/era/0.13.0": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet (era first sampled at block 501,514, the executor floor)"
+  },
+  "4.1/era/0.13.1": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet; replayed in the yield reading's pinned windows (measurements/starknet-replay-yield.json), not pinned offline"
+  },
+  "4.1/era/0.13.1.1": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.13.2": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.13.2.1": {
+   "cases": [
+    "800008"
+   ]
+  },
+  "4.1/era/0.13.3": {
+   "cases": [
+    "1014529"
+   ]
+  },
+  "4.1/era/0.13.4": {
+   "cases": [],
+   "uncovered": "not observed by the 25,000-block version sample of 2026-10-22; whether mainnet has blocks of this era is unmeasured"
+  },
+  "4.1/era/0.13.5": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.13.6": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.14.0": {
+   "cases": [
+    "1948151"
+   ]
+  },
+  "4.1/era/0.14.1": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.14.2": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.14.3": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.1/era/0.14.4": {
+   "cases": [
+    "16625884",
+    "16664301",
+    "16752201"
+   ]
+  },
+  "4.10/cairo0-class": {
+   "cases": [
+    "800008:3"
+   ]
+  },
+  "4.10/sierra/1.1.0": {
+   "cases": [
+    "0x6551d5af6e4eb4fac2f9fea06948a49a6d12d924e43a63e6034a6a75e749577"
+   ]
+  },
+  "4.10/sierra/1.2.0": {
+   "cases": [
+    "0x1a736d6ed154502257f02b1ccdf4d9d1089f80811cd6acad48e6b6a9d1f2003"
+   ]
+  },
+  "4.10/sierra/1.3.0": {
+   "cases": [
+    "0x306288971002bd7906e3a607d504dfb28dcbdc7655a115984e567dce3b67e8f",
+    "0x358663e6ed9d37efd33d4661e20b2bad143e0f92076b0c91fe65f31ccf55046",
+    "0x38ba9a33904093a0a07a3813b360b415a8bdddc6830f90df150c82a210b32f2",
+    "0x3c8904d062171ab62c1f2e52e2b33299c305626a8f8a253a1544a6ad774121b",
+    "0x4231e8125da430bdec5ad18810528fbc520db9984a7ef4a890b0984c8eadf2a",
+    "0x47f56c4572d11b6847e61de41cb268c3667b0d1b55e14aa183c8d802e5a72ac",
+    "0x4c6d6cf894f8bc96bb9c525e6853e5483177841f7388f74a46cfda6f028c755",
+    "0x52fcd24ffeb5ea84cfc781dd3bf4126d718acedb58547d73d6480779acbe60a",
+    "0x5dde112c893e2f5ed85b92a08d93cfa5579ce95d27afb34e47b7e7aad59c1c0",
+    "0x5e269051bec902aa2bd421d348e023c3893c4ff93de6c5f4b8964cd67cc3fc5",
+    "0x5ffbcfeb50d200a0677c48a129a11245a3fc519d1d98d76882d1c9a1b19c6ed"
+   ]
+  },
+  "4.10/sierra/1.4.0": {
+   "cases": [
+    "0x29927c8af6bccf3f6fda035981e765a7bdbf18a2dc0d630494f8758aa908e2b",
+    "0x4225fcf6bf42a54dec4e9b6d3e7d1b5eb844f5ba9694058ef21826fd00cdba1",
+    "0x61dac032f228abef9c6626f995015233097ae253a7f72d68552db02f2971b8f"
+   ]
+  },
+  "4.10/sierra/1.5.0": {
+   "cases": [
+    "0x137a5970f752fd80649fb38d684b090decebec4f2853396617e4f2f01e5396a",
+    "0x2d50ce93c8be63e43709cafa4be8b3f63673cfe7e114303d6ba2349cbfd642a",
+    "0x2f6d77cb0bca422706a91858dff62975aef4b8214520aadb1f0b39c51f5fde",
+    "0x36078334509b514626504edc9fb252328d1a240e4e948bef8d0c08dff45927f",
+    "0x36554b454dae4b428e35694abfcffd42f266b0e7e5f2e1cdc44d179f7ee220c",
+    "0x4ad3c1dc8413453db314497945b6903e1c766495a1e60492d44da9c2a986e4b",
+    "0x5431265f9d2416426da800a23ddd3fe33db8e2b9fe96dbc48588ac3ac70c091",
+    "0x54e57545b42b9e06a372026d20238d192bfc5378110670cb0ddb8b295014af9",
+    "0x5fdb47de4edfd5983f6a82a1beeb1aab2b69d3674b90730aa1693d94d73f0d3",
+    "0x7f3777c99f3700505ea966676aac4a0d692c2a9f5e667f4c606b51ca1dd3420",
+    "0xad4c3a594c5366e1a6d9faa16618a6a91781e47662b79dd93848d5827b62f0",
+    "0xe2eb8f5672af4e6a4e8a8f1b44989685e668489b0a25437733756c5a34a1d6"
+   ]
+  },
+  "4.10/sierra/1.6.0": {
+   "cases": [
+    "0x198ad2141ac35f2d53f72f3a53fa00223c948e5cf027344f572dbdb411fc337",
+    "0x2a6f52c3635211b907467b53e3a712be41f0115d03f9d5903d448a1cd4f6f5c",
+    "0x2c8c7e6fbcfb3e8e15a46648e8914c6aa1fc506fc1e7fb3d1e19630716174bc",
+    "0x2ce2e4ba33509a120ea4152aa7265bd612713036408ffca49dc8d6cf0be6f09",
+    "0x45575a88cc5cef1e444c77ce60b7b4c9e73a01cbbe20926d5a4c72a94011410",
+    "0x4fd8d4e2c73ff8ad0f43c73fe3a26a9e98060539876f0393a41be1bd6021b5e",
+    "0x511dd75da368f5311134dee2356356ac4da1538d2ad18aa66d57c47e3757d59",
+    "0x55f9ac6f3cfd1a716aadc27b5ec9e23d9d656515d5cc20875ad4887108e1504",
+    "0x5b4b537eaa2399e3aa99c4e2e0208ebd6c71bc1467938cd52c798c601e43564",
+    "0x5be66113526f96d4bb34d6a2b80b5d7dd8639104a30cf9d5d14ff930defa583",
+    "0x70076ce390811f906002b8ed1407bd405af6e0e363657fb62415b0518c054ab",
+    "0x743c83c41ce99ad470aa308823f417b2141e02e04571f5c0004e743556e7faf"
+   ]
+  },
+  "4.10/sierra/1.7.0": {
+   "cases": [
+    "0x11767fe11872c49384507e371318d25d3400f1b7886953dc4a43c704e77f74",
+    "0x1b5b24619d2a008055dd65755028015d8dac79a8a583dfc545944edb857b80b",
+    "0x2e77ee61d4df3d988ee1f42ea5442e913862cc82c2584d212ecda76666498fc",
+    "0x345354e2d801833068de73d1a2028e2f619f71045dd5229e79469fa7f598038",
+    "0x40499638a9874b013acd81ba5dad95c7659d889a27828b35bff3387367f70e6",
+    "0x4ee613c37073bc2346a7116e37de510954f9bb52ad2ff1b67b381a2434911bf",
+    "0x55574645f135e0471a71bc1b33d72cea5d5c5072fac01b9822193681603722e",
+    "0x626c15d497f8ef78da749cbe21ac3006470829ee8b5d0d166f3a139633c6a93",
+    "0x73414441639dcd11d1846f287650a00c60c416b9d3ba45d31c651672125b2c2",
+    "0x77772d2a5cbfe29c126d701ac6cda92fb5ff1d99ad2a5ab7852382233e81e98",
+    "0x78a357382d29a07ab7e32c5ce3ffae20021abee67c353b8885737b1d643eac9",
+    "0x78f684e922084e38bc9af3a696b66060c04b640630427452d98f30d718d6096",
+    "0xb45dbc3714180381c5680e41931172d67194d77d504413465390e0bef194ec",
+    "0xfe5a54abc002ed5d4ce64d33b16e490af97333b5d4fa3963c433d83d46a068"
+   ]
+  },
+  "4.10/sierra/1.9.3": {
+   "cases": [
+    "0x12773ab0e10659057488a1450d67992fee60e37a4385221d637c41df684acd9",
+    "0x2934861371b6dafb8c1058b20717c07eb7fc6f24ace5f0983bcc7263c429fdc",
+    "0x423df19e032f2d9bf9bb5bc1ea96db2b06d4c752c8c130cba7d577eed1de20a",
+    "0x4453a062e94ac6294c359270755596c00c21b7bf014ce55ace0f3c3de421100"
+   ]
+  },
+  "4.10/sierra/1.9.5": {
+   "cases": [
+    "0x58e7785170cf2864daf8475d01b7cdbcdc05784444393d5bd231861ed21dc80"
+   ]
+  },
+  "4.11/fee-in-eth": {
+   "cases": [
+    "1014529:0",
+    "1014529:10",
+    "1014529:13",
+    "1014529:14",
+    "1014529:15",
+    "1014529:2",
+    "1014529:8",
+    "800008:0",
+    "800008:3",
+    "800008:4"
+   ]
+  },
+  "4.11/fee-in-strk": {
+   "cases": [
+    "1014529:1",
+    "1014529:11",
+    "1014529:12",
+    "1014529:3",
+    "1014529:4",
+    "1014529:5",
+    "1014529:6",
+    "1014529:7",
+    "1014529:9",
+    "16625884:0",
+    "16625884:1",
+    "16625884:10",
+    "16625884:11",
+    "16625884:12",
+    "16625884:13",
+    "16625884:14",
+    "16625884:15",
+    "16625884:16",
+    "16625884:17",
+    "16625884:2",
+    "16625884:3",
+    "16625884:4",
+    "16625884:5",
+    "16625884:6",
+    "16625884:7",
+    "16625884:8",
+    "16625884:9",
+    "16664301:0",
+    "16752201:1",
+    "1948151:0",
+    "1948151:1",
+    "1948151:2",
+    "1948151:3",
+    "1948151:4",
+    "800008:1",
+    "800008:2"
+   ]
+  },
+  "4.11/l2-to-l1-message": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet (a transaction that sends an L2->L1 message)"
+  },
+  "4.2/type/DECLARE/0x2": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.2/type/DECLARE/0x3": {
+   "cases": [
+    "1014529:1",
+    "1014529:11",
+    "1014529:9"
+   ]
+  },
+  "4.2/type/DEPLOY_ACCOUNT/0x1": {
+   "cases": [
+    "1014529:13"
+   ]
+  },
+  "4.2/type/DEPLOY_ACCOUNT/0x3": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.2/type/INVOKE/0x0": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet"
+  },
+  "4.2/type/INVOKE/0x1": {
+   "cases": [
+    "1014529:0",
+    "1014529:10",
+    "1014529:14",
+    "1014529:15",
+    "1014529:2",
+    "1014529:8",
+    "800008:0",
+    "800008:3",
+    "800008:4"
+   ]
+  },
+  "4.2/type/INVOKE/0x3": {
+   "cases": [
+    "1014529:12",
+    "1014529:3",
+    "1014529:4",
+    "1014529:5",
+    "1014529:6",
+    "1014529:7",
+    "16625884:0",
+    "16625884:1",
+    "16625884:10",
+    "16625884:11",
+    "16625884:12",
+    "16625884:13",
+    "16625884:14",
+    "16625884:15",
+    "16625884:16",
+    "16625884:17",
+    "16625884:2",
+    "16625884:3",
+    "16625884:4",
+    "16625884:5",
+    "16625884:6",
+    "16625884:7",
+    "16625884:8",
+    "16625884:9",
+    "16664301:0",
+    "16752201:1",
+    "1948151:0",
+    "1948151:1",
+    "1948151:2",
+    "1948151:3",
+    "1948151:4",
+    "800008:1",
+    "800008:2"
+   ]
+  },
+  "4.2/type/L1_HANDLER/0x0": {
+   "cases": [
+    "16752201:0"
+   ]
+  },
+  "4.3/l1-handler": {
+   "cases": [
+    "16752201:0"
+   ]
+  },
+  "4.4/syscalls-as-frames": {
+   "cases": [],
+   "uncovered": "BY DESIGN NOT RECORDED: the recorder opens frames for entry points and Cairo function calls; a syscall (storage_read, call_contract's dispatch, emit_event, get_execution_info, ...) is a step inside its caller, not a frame with its own inputs, outputs and cost"
+  },
+  "4.5/declare": {
+   "cases": [
+    "1014529:1",
+    "1014529:11",
+    "1014529:9"
+   ]
+  },
+  "4.5/deploy-account": {
+   "cases": [
+    "1014529:13"
+   ]
+  },
+  "4.5/deploy-from-a-call": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet (a deploy syscall from inside a transaction; the DEPLOY_ACCOUNT case is 4.5/deploy-account)"
+  },
+  "4.6/class-replaced-after-the-transaction": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet: a transaction whose contract's class was replaced LATER, proving resolution at the transaction's block"
+  },
+  "4.6/replace-class": {
+   "cases": [
+    "16625884:0"
+   ]
+  },
+  "4.7/entry-point-depth-4": {
+   "cases": [
+    "1014529:10",
+    "1014529:12",
+    "1014529:14",
+    "1014529:4",
+    "1014529:5",
+    "1014529:6",
+    "1014529:7",
+    "1014529:8",
+    "16625884:0",
+    "16625884:1",
+    "16625884:10",
+    "16625884:12",
+    "16625884:13",
+    "16625884:14",
+    "16625884:5",
+    "16625884:6",
+    "16625884:7",
+    "16625884:8",
+    "16625884:9",
+    "16664301:0",
+    "1948151:2",
+    "1948151:4",
+    "800008:3"
+   ]
+  },
+  "4.7/library-call": {
+   "cases": [
+    "1014529:15",
+    "16625884:0",
+    "800008:0"
+   ]
+  },
+  "4.7/reentrancy": {
+   "cases": [
+    "1014529:12",
+    "1014529:15",
+    "1014529:4",
+    "1014529:5",
+    "1014529:8",
+    "16625884:0",
+    "16625884:1",
+    "16625884:10",
+    "16625884:12",
+    "16625884:13",
+    "16625884:14",
+    "16625884:5",
+    "16625884:6",
+    "16625884:7",
+    "16625884:8",
+    "16625884:9",
+    "16664301:0",
+    "800008:0"
+   ]
+  },
+  "4.8/failed-call-in-a-succeeding-transaction": {
+   "cases": [],
+   "uncovered": "no committed fixture of this cell yet (a frame that fails and is caught, in a SUCCEEDED transaction)"
+  },
+  "4.8/out-of-gas": {
+   "cases": [],
+   "uncovered": "unmeasured: the reverted cases are not yet classified by revert reason, so whether any is a resource exhaustion is not asserted"
+  },
+  "4.8/reverted": {
+   "cases": [
+    "16625884:11",
+    "16625884:13",
+    "16625884:16",
+    "16625884:2",
+    "16625884:3",
+    "16625884:4",
+    "16625884:5",
+    "16625884:6",
+    "16625884:8"
+   ]
+  },
+  "4.9/truncation": {
+   "cases": [],
+   "uncovered": "BY DESIGN NOT APPLICABLE TODAY: the recorder has no step budget, depth cap or size cap \u2014 it records every executed step \u2014 so there is no boundary to test; a cap introduced later must come with its just-under / just-over pair"
+  }
+ }
+}

@@ -212,7 +212,7 @@ pub fn executable(state: &RpcState, hash: &str, body: &Value) -> Result<Blockifi
         }
         Transaction::Declare(ref d) => {
             let rec = state
-                .class_record(d.class_hash())
+                .declared_class_record(d.class_hash())
                 .map_err(|e| eyre!("{hash}: the declared class: {e}"))?;
             let (sierra_len, abi_len) = match &rec.casm {
                 Some(_) => (

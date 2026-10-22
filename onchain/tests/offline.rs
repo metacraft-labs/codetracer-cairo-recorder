@@ -709,7 +709,10 @@ fn trace_fixture(name: &str, block: &str) -> Value {
     let fx = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
-    let out = scratch(name);
+    // Unique per call: tests run in parallel and two of them replay the same fixture.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = scratch(&format!("{name}-{n}"));
     let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
         .args(["trace-block", block, "--transcript-in"])
         .arg(&fx)
@@ -718,7 +721,12 @@ fn trace_fixture(name: &str, block: &str) -> Value {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    serde_json::from_str(&std::fs::read_to_string(out.join("block.json")).unwrap()).unwrap()
+    let b =
+        serde_json::from_str(&std::fs::read_to_string(out.join("block.json")).unwrap()).unwrap();
+    // block.json carries every transaction's full report; the containers beside it are
+    // not read here, and a 16-transaction block's are hundreds of megabytes.
+    let _ = std::fs::remove_dir_all(&out);
+    b
 }
 
 #[test]
@@ -756,4 +764,194 @@ fn a_block_inside_the_documented_hole_reproduces() {
     for k in ["storageEntries", "nonces", "classHashes"] {
         assert_eq!(b["blockStateDiff"][k]["matches"], true, "{k}");
     }
+}
+
+// ── The divergence corpus (Recorder-Cairo CXP-CAIRO-4; Blockchain-Recorder-Test-Suites §4, §7)
+//
+// `corpus/starknet-divergence-corpus.json` declares every taxonomy cell applicable to
+// Starknet, and for each either the captured cases in it or why it is uncovered. This
+// test replays EVERY committed fixture, computes each measurable cell's cases from what
+// the replays report, and requires the manifest to say exactly that — in both
+// directions. A cell that gains a case the manifest does not list fails, and so does a
+// listed case the replays do not show, so "covered" can neither go stale nor be claimed.
+// Every case must also have reproduced every counted fact. `CORPUS_WRITE=1` prints the
+// measured reading instead, for a deliberate update.
+
+const CORPUS_FIXTURES: &[(&str, &str)] = &[
+    ("mainnet-16664301", "16664301"),
+    ("mainnet-16752201", "16752201"),
+    ("mainnet-16625884", "16625884"),
+    ("mainnet-1948151", "1948151"),
+    ("mainnet-800008", "800008"),
+    ("mainnet-1014529", "1014529"),
+];
+
+fn measured_cells() -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut c: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut add = |cell: String, case: String| {
+        c.entry(cell).or_default().insert(case);
+    };
+    for (dir, block) in CORPUS_FIXTURES {
+        let b = trace_fixture(dir, block);
+        assert_eq!(
+            b["replayed"], b["transactions"],
+            "{dir}: every case reproduces"
+        );
+        for k in ["storageEntries", "nonces", "classHashes"] {
+            assert_eq!(b["blockStateDiff"][k]["matches"], true, "{dir}: {k}");
+        }
+        add(
+            format!("4.1/era/{}", b["starknetVersion"].as_str().unwrap()),
+            block.to_string(),
+        );
+        for r in b["perTransaction"].as_array().unwrap() {
+            let case = format!("{block}:{}", r["txIndex"]);
+            let (ty, ver) = (r["type"].as_str().unwrap(), r["version"].as_str().unwrap());
+            add(format!("4.2/type/{ty}/{ver}"), case.clone());
+            let fact = |f: &str| {
+                r["effects"]["facts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|x| x["field"] == f)
+                    .map(|x| x["published"].clone())
+                    .unwrap_or(Value::Null)
+            };
+            let status = fact("executionStatus");
+            if ty == "L1_HANDLER" {
+                add("4.3/l1-handler".into(), case.clone());
+            }
+            if ty == "DEPLOY_ACCOUNT" {
+                add("4.5/deploy-account".into(), case.clone());
+            }
+            if ty == "DECLARE" {
+                add("4.5/declare".into(), case.clone());
+            }
+            for ch in r["classChanges"].as_array().unwrap() {
+                match (ch["kind"].as_str(), ty) {
+                    (Some("deployed"), t) if t != "DEPLOY_ACCOUNT" => {
+                        add("4.5/deploy-from-a-call".into(), case.clone())
+                    }
+                    (Some("replaced"), _) => add("4.6/replace-class".into(), case.clone()),
+                    _ => {}
+                }
+            }
+            let frames = r["frames"].as_array().unwrap();
+            let parent: std::collections::HashMap<u64, Option<u64>> = frames
+                .iter()
+                .map(|f| (f["id"].as_u64().unwrap(), f["parent"].as_u64()))
+                .collect();
+            let contract: std::collections::HashMap<u64, &str> = frames
+                .iter()
+                .map(|f| (f["id"].as_u64().unwrap(), f["contract"].as_str().unwrap()))
+                .collect();
+            if frames.iter().any(|f| f["callType"] == "Delegate") {
+                add("4.7/library-call".into(), case.clone());
+            }
+            let chain = |mut i: u64| {
+                let mut v = vec![i];
+                while let Some(Some(p)) = parent.get(&i) {
+                    v.push(*p);
+                    i = *p;
+                }
+                v
+            };
+            if frames.iter().any(|f| {
+                let ids = chain(f["id"].as_u64().unwrap());
+                let mut seen = BTreeSet::new();
+                ids.iter().any(|i| !seen.insert(contract[i]))
+            }) {
+                add("4.7/reentrancy".into(), case.clone());
+            }
+            if frames
+                .iter()
+                .any(|f| chain(f["id"].as_u64().unwrap()).len() >= 4)
+            {
+                add("4.7/entry-point-depth-4".into(), case.clone());
+            }
+            if status == "REVERTED" {
+                add("4.8/reverted".into(), case.clone());
+            }
+            if status == "SUCCEEDED" && r["vm"]["framesWithError"].as_u64().unwrap_or(0) > 0 {
+                add(
+                    "4.8/failed-call-in-a-succeeding-transaction".into(),
+                    case.clone(),
+                );
+            }
+            if r["vm"]["cairo0Frames"].as_u64().unwrap_or(0) > 0 {
+                add("4.10/cairo0-class".into(), case.clone());
+            }
+            for cl in r["classes"].as_array().unwrap() {
+                if let Some(v) = cl["sierraVersion"].as_str() {
+                    add(
+                        format!("4.10/sierra/{v}"),
+                        cl["classHash"].as_str().unwrap().to_string(),
+                    );
+                }
+            }
+            if fact("messagesSent").as_u64().unwrap_or(0) > 0 {
+                add("4.11/l2-to-l1-message".into(), case.clone());
+            }
+            match ver {
+                "0x3" => add("4.11/fee-in-strk".into(), case.clone()),
+                "0x1" | "0x2" if ty != "L1_HANDLER" => add("4.11/fee-in-eth".into(), case.clone()),
+                _ => {}
+            }
+        }
+    }
+    c
+}
+
+#[test]
+fn the_divergence_corpus_covers_exactly_what_it_declares() {
+    let measured = measured_cells();
+    if std::env::var("CORPUS_WRITE").is_ok() {
+        println!("{}", serde_json::to_string_pretty(&measured).unwrap());
+        return;
+    }
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/starknet-divergence-corpus.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let cells = manifest["cells"].as_object().unwrap();
+    let mut problems = vec![];
+    for (id, cases) in &measured {
+        match cells.get(id) {
+            None => problems.push(format!(
+                "{id}: measured {} case(s); the manifest has no such cell",
+                cases.len()
+            )),
+            Some(cell) => {
+                let listed: std::collections::BTreeSet<String> = cell["cases"]
+                    .as_array()
+                    .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+                    .unwrap_or_default();
+                if &listed != cases {
+                    problems.push(format!("{id}: listed {listed:?}, measured {cases:?}"));
+                }
+            }
+        }
+    }
+    for (id, cell) in cells {
+        let listed = cell["cases"].as_array().map(|a| a.len()).unwrap_or(0);
+        if listed > 0 && !measured.contains_key(id) {
+            problems.push(format!(
+                "{id}: lists {listed} case(s) the replays do not show"
+            ));
+        }
+        if listed == 0 && cell["uncovered"].as_str().unwrap_or("").is_empty() {
+            problems.push(format!(
+                "{id}: no case and no stated reason — an uncovered cell says why"
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "the corpus manifest disagrees with the replays:\n{}",
+        problems.join("\n")
+    );
 }

@@ -269,6 +269,23 @@ impl<'a> RpcState<'a> {
         }
     }
 
+    /// The class a DECLARE in this block declares, read AT THE DECLARING BLOCK (the parent
+    /// block has no such class yet — that is what the DECLARE changes). A class's
+    /// definition is fixed by its hash, so reading it after it exists is reading the
+    /// definition the transaction carried. It is NOT cached in the reader: to the
+    /// executor the class must stay undeclared at the parent state, or it would refuse
+    /// the DECLARE as a redeclaration.
+    pub fn declared_class_record(&self, class_hash: ClassHash) -> Result<ClassRecord> {
+        let params = json!({ "block_id": { "block_number": self.block + 1 },
+                             "class_hash": class_hash.0.to_hex_string() });
+        match self.rpc.answer("starknet_getClass", params)? {
+            Answer::Ok(v) => class_from_rpc(class_hash, v),
+            Answer::Error { code, message, .. } => {
+                Err(eyre!("getClass at the declaring block: {code} {message}"))
+            }
+        }
+    }
+
     pub fn class_record(&self, class_hash: ClassHash) -> StateResult<ClassRecord> {
         if let Some(c) = self.classes.borrow().get(&class_hash) {
             return Ok(c.clone());
