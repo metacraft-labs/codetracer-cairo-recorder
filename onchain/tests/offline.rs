@@ -705,6 +705,92 @@ fn an_l1_handler_block_reproduces_from_its_transcript() {
     assert_eq!(rows[1]["vm"]["steps"], 9831);
 }
 
+// Both of this block's entry classes are bound from the source Voyager serves for their
+// class hashes: StarkGate's TokenBridge (Cairo 2.3.0, names only — that compiler records
+// no locations) runs the L1 handler, and Argent 0.5.0 (Cairo 2.10.1, GPL-3.0, texts
+// embedded) is the INVOKE's account, so that transaction has steps on Cairo lines.
+const L1_HANDLER_TX: &str = "0x677215c36be163338b1da157a5b02d0330ed75ea1a09723de810507b183600b";
+const ARGENT_INVOKE_TX: &str = "0x7329e82b056bdf8a949e85fb10a3b19093d606153ca448a6bac057651abb8f5";
+const TOKEN_BRIDGE: &str = "0x358663e6ed9d37efd33d4661e20b2bad143e0f92076b0c91fe65f31ccf55046";
+const ARGENT_050: &str = "0x73414441639dcd11d1846f287650a00c60c416b9d3ba45d31c651672125b2c2";
+/// Was 369 (the ETH transfer's StarkGate token alone) before Argent 0.5.0 was bound.
+const ARGENT_INVOKE_CAIRO_STEPS: u64 = 2214;
+
+fn l1h_reports(class_sources: Option<&Path>, name: &str) -> (Value, Value) {
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mainnet-16752201");
+    let out = scratch(name);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"));
+    c.args(["trace-block", "16752201", "--transcript-in"])
+        .arg(&fx)
+        .arg("-o")
+        .arg(&out);
+    if let Some(d) = class_sources {
+        c.arg("--class-sources").arg(d);
+    }
+    let o = c.output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let report = |tx: &str| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(out.join(tx).join("report.json")).unwrap())
+            .unwrap()
+    };
+    let r = (report(L1_HANDLER_TX), report(ARGENT_INVOKE_TX));
+    let _ = std::fs::remove_dir_all(&out);
+    r
+}
+
+fn class_row(report: &Value, hash: &str) -> Value {
+    report["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["classHash"] == hash)
+        .unwrap_or_else(|| panic!("{hash} ran: {:#}", report["classes"]))
+        .clone()
+}
+
+#[test]
+fn the_l1_handler_blocks_classes_are_bound_from_voyagers_sources() {
+    let (l1, invoke) = l1h_reports(Some(&sources()), "l1h-bound");
+    let bridge = class_row(&l1, TOKEN_BRIDGE);
+    assert_eq!(bridge["source"]["bound"], true, "{bridge:#}");
+    assert_eq!(bridge["source"]["functionsNamed"], 332);
+    assert_eq!(bridge["source"]["codeLocations"], false, "Cairo 2.3.0");
+    assert_eq!(bridge["source"]["provenance"]["build"]["source"], "voyager");
+    let argent = class_row(&invoke, ARGENT_050);
+    assert_eq!(argent["source"]["bound"], true, "{argent:#}");
+    assert_eq!(argent["source"]["functionsNamed"], 237);
+    assert_eq!(argent["source"]["codeLocations"], true);
+    assert_eq!(
+        argent["source"]["provenance"]["build"]["license"],
+        "GPL-3.0"
+    );
+    let on_lines = invoke["container"]["cairoSteps"].as_u64().unwrap();
+    assert_eq!(
+        on_lines, ARGENT_INVOKE_CAIRO_STEPS,
+        "{:#}",
+        invoke["container"]
+    );
+    assert!(invoke["container"]["cairoSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f
+            .as_str()
+            .unwrap()
+            .starts_with("./sources/cairo/argent-contracts-starknet/src/")));
+    // CONTROL: the same block without the bindings has nothing bound and nothing on lines.
+    let (l1_plain, invoke_plain) = l1h_reports(None, "l1h-plain");
+    assert_eq!(
+        class_row(&l1_plain, TOKEN_BRIDGE)["source"]["bound"],
+        Value::Null
+    );
+    assert_eq!(invoke_plain["container"]["cairoSteps"], 0);
+    assert_eq!(
+        invoke_plain["vm"]["steps"], invoke["vm"]["steps"],
+        "a binding never changes what ran"
+    );
+}
+
 // ── A class upgrade, and a block inside the documented hole ──────────────────────────
 //
 // Mainnet block 16,625,884 (18 transactions): index 0 upgrades account 0x6d626c63…e867 to
