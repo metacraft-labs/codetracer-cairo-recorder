@@ -324,3 +324,10 @@ onchain-with-voyager-key IDENTITY *CMD:
     set -euo pipefail
     cmd=({{CMD}}); [ "${cmd[0]:-}" = "--" ] && cmd=("${cmd[@]:1}")
     VOYAGER_API_KEY="$(age --decrypt -i "{{IDENTITY}}" onchain/secrets/voyager-api-key.age)" exec "${cmd[@]}"
+
+# Fetch classes' verified sources from Voyager into OUT, under Source-Resolution §4a
+# (see onchain/voyager-class-source.sh). The answers are inputs to `bind-class`; a
+# binding, not the answer, is what a recording carries, so no rebuild calls Voyager.
+#   just onchain-voyager-class-source ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey OUT 0x78a3…
+onchain-voyager-class-source IDENTITY OUT +HASHES:
+    just onchain-with-voyager-key "{{IDENTITY}}" -- onchain/voyager-class-source.sh "{{OUT}}" {{HASHES}}

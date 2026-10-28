@@ -484,7 +484,9 @@ fn scratch_path(name: &str) -> PathBuf {
 // Ekubo Core (EkuboProtocol/starknet-contracts v5.0.3, Scarb 2.20.0,
 // LicenseRef-Ekubo-Proprietary — republished with its SPDX identifier by operator
 // decision, 2026-10-22). The Argent account and Ekubo's Router are names only (Cairo
-// 2.6.3 records no locations), and USDC is unbound: those steps stay on CASM.
+// 2.6.3 records no locations): those steps stay on CASM. USDC (Circle's FiatToken,
+// Apache-2.0, Scarb 2.12.0) is bound from the source Voyager serves for its class hash,
+// with locations and its texts embedded.
 
 const STRK: &str = "0x2e77ee61d4df3d988ee1f42ea5442e913862cc82c2584d212ecda76666498fc";
 const EKUBO_CORE: &str = "0x423df19e032f2d9bf9bb5bc1ea96db2b06d4c752c8c130cba7d577eed1de20a";
@@ -504,25 +506,31 @@ fn steps_in_a_class_with_embedded_sources_are_on_cairo_lines() {
     let out = scratch("cairo-lines");
     run_with_sources(&sources(), &out);
     let r = container_report(&out);
-    assert_eq!(r["container"]["cairoSteps"], 11162, "{:#}", r["container"]);
+    assert_eq!(r["container"]["cairoSteps"], 13195, "{:#}", r["container"]);
     let files: Vec<&str> = r["container"]["cairoSources"]
         .as_array()
         .unwrap()
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(files.len(), 42, "only files a step is shown in: {files:?}");
+    assert_eq!(files.len(), 53, "only files a step is shown in: {files:?}");
     assert!(files.contains(&ERC20));
     assert!(files
         .contains(&"./sources/cairo/starkgate-contracts/packages/strk/src/erc20_lockable.cairo"));
     assert!(files.contains(&"./sources/cairo/starknet-contracts/src/core.cairo"));
-    // Two builds, two corelibs: each class's steps are in its own compiler's corelib.
+    assert!(files
+        .iter()
+        .any(|f| f.starts_with("./sources/cairo/stablecoin-starknet/packages/stablecoin/src/")));
+    // Three compilers, three corelibs: each class's steps are in its own compiler's corelib.
     assert!(files
         .iter()
         .any(|f| f.starts_with("./sources/cairo/core@2.15.0/")));
     assert!(files
         .iter()
         .any(|f| f.starts_with("./sources/cairo/core@2.20.0/")));
+    assert!(files
+        .iter()
+        .any(|f| f.starts_with("./sources/cairo/core@2.12.0/")));
     // The file written beside the container is the text the build read.
     let binding = gz_json(&sources().join(format!("{STRK}.json.gz")));
     let embedded = binding["files"]
@@ -616,7 +624,7 @@ fn control_the_same_bindings_without_their_texts_position_nothing_on_source() {
         .iter()
         .filter(|c| c["source"]["bound"] == true)
         .count();
-    assert_eq!(bound, 5, "names still apply without the texts");
+    assert_eq!(bound, 6, "names still apply without the texts");
 }
 
 #[test]
