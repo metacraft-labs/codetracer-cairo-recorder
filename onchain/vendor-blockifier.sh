@@ -7,7 +7,9 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here"
 version="$(awk '/^name = "blockifier"$/{getline; sub(/^version = "/,""); sub(/"$/,""); print; exit}' Cargo.lock)"
-want="$(awk '/^name = "blockifier"$/{f=1} f&&/^checksum = /{sub(/^checksum = "/,""); sub(/"$/,""); print; exit}' Cargo.lock)"
+# Only blockifier's own `[[package]]` stanza, which a blank line ends: a [patch]ed
+# blockifier has no `checksum` line, and reading on would take the NEXT package's.
+want="$(awk '/^name = "blockifier"$/{f=1} f&&/^$/{exit} f&&/^checksum = /{sub(/^checksum = "/,""); sub(/"$/,""); print; exit}' Cargo.lock)"
 if [ -z "$version" ]; then
   echo "vendor-blockifier.sh: Cargo.lock names no blockifier version" >&2
   exit 2
