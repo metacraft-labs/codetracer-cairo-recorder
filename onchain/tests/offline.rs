@@ -847,6 +847,49 @@ fn an_upgrade_is_reproduced_and_named_on_its_own_transaction() {
     }
 }
 
+/// A frame that fails inside a transaction that SUCCEEDS: the one shape in which a
+/// recording carries an entry-point `Error` return and an `Error` event without the
+/// transaction having reverted. Block 17,261,713's only transaction calls a selector
+/// its target does not have, at call depth 3, and the caller carries on.
+#[test]
+fn a_failed_call_in_a_succeeding_transaction_reproduces() {
+    let b = trace_fixture("mainnet-17261713", "17261713");
+    assert_eq!(
+        (b["transactions"].as_u64(), b["replayed"].as_u64()),
+        (Some(1), Some(1)),
+        "{b:#}"
+    );
+    for k in ["storageEntries", "nonces", "classHashes"] {
+        assert_eq!(b["blockStateDiff"][k]["matches"], true, "{k}");
+    }
+    let r = &b["perTransaction"][0];
+    let status = r["effects"]["facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["field"] == "executionStatus")
+        .map(|x| x["published"].clone());
+    assert_eq!(status, Some(serde_json::json!("SUCCEEDED")), "{r:#}");
+    assert_eq!(r["vm"]["framesWithError"], 1, "{:#}", r["vm"]);
+    // CONTROL: the failing frame is named by the error the executor raised, so the
+    // count above is about this call and not some other frame's state.
+    let failed: Vec<&Value> = r["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["failed"] == true)
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("0xfe80f537b66d12a00b6d3c072b44afbb716e78dde5c3f0ef116ee93d3e3283"),
+        "{:#}",
+        failed[0]
+    );
+}
+
 #[test]
 fn a_block_inside_the_documented_hole_reproduces() {
     let b = trace_fixture("mainnet-1948151", "1948151");
@@ -878,6 +921,7 @@ const CORPUS_FIXTURES: &[(&str, &str)] = &[
     ("mainnet-1948151", "1948151"),
     ("mainnet-800008", "800008"),
     ("mainnet-1014529", "1014529"),
+    ("mainnet-17261713", "17261713"),
 ];
 
 fn measured_cells() -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {

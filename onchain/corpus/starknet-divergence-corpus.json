@@ -10,7 +10,8 @@
   "tests/fixtures/mainnet-16625884",
   "tests/fixtures/mainnet-1948151",
   "tests/fixtures/mainnet-800008",
-  "tests/fixtures/mainnet-1014529"
+  "tests/fixtures/mainnet-1014529",
+  "tests/fixtures/mainnet-17261713"
  ],
  "report": {
   "highestOracleTier": "1 \u2014 every receipt fact the recorder counts (status, fee, gas vector, events, L2->L1 messages, call tree) \u2014 plus each block's whole state diff equal to the node's starknet_getStateUpdate. Tiers 2 and 3 (the header's receipt and state commitments) are not computed.",
@@ -83,7 +84,8 @@
    "cases": [
     "16625884",
     "16664301",
-    "16752201"
+    "16752201",
+    "17261713"
    ]
   },
   "4.10/cairo0-class": {
@@ -159,9 +161,12 @@
    "cases": [
     "0x11767fe11872c49384507e371318d25d3400f1b7886953dc4a43c704e77f74",
     "0x1b5b24619d2a008055dd65755028015d8dac79a8a583dfc545944edb857b80b",
+    "0x2b75fed3603ab06dd911d508f992af82e447efa10150dc4439616d229e5e720",
     "0x2e77ee61d4df3d988ee1f42ea5442e913862cc82c2584d212ecda76666498fc",
+    "0x338b3dfd3ec7ea3ebc9603ca3398142596f6f185ab8a5d0d923813c9cd85ce1",
     "0x345354e2d801833068de73d1a2028e2f619f71045dd5229e79469fa7f598038",
     "0x40499638a9874b013acd81ba5dad95c7659d889a27828b35bff3387367f70e6",
+    "0x455be34804795be4df8ef5350fd2fcfa43970524a68184c8920739732132886",
     "0x4ee613c37073bc2346a7116e37de510954f9bb52ad2ff1b67b381a2434911bf",
     "0x55574645f135e0471a71bc1b33d72cea5d5c5072fac01b9822193681603722e",
     "0x626c15d497f8ef78da749cbe21ac3006470829ee8b5d0d166f3a139633c6a93",
@@ -177,8 +182,10 @@
    "cases": [
     "0x12773ab0e10659057488a1450d67992fee60e37a4385221d637c41df684acd9",
     "0x2934861371b6dafb8c1058b20717c07eb7fc6f24ace5f0983bcc7263c429fdc",
+    "0x3fcc44dd67c7282604f5c4405f299512d26e46b093ea684814410c60d6d668a",
     "0x423df19e032f2d9bf9bb5bc1ea96db2b06d4c752c8c130cba7d577eed1de20a",
-    "0x4453a062e94ac6294c359270755596c00c21b7bf014ce55ace0f3c3de421100"
+    "0x4453a062e94ac6294c359270755596c00c21b7bf014ce55ace0f3c3de421100",
+    "0x72eb1acd821ee053c5e25ba11bacd5066cb963c61ef72dfd4c04349ffd7a6b7"
    ]
   },
   "4.10/sierra/1.9.5": {
@@ -231,6 +238,7 @@
     "16625884:9",
     "16664301:0",
     "16752201:1",
+    "17261713:0",
     "1948151:0",
     "1948151:1",
     "1948151:2",
@@ -309,6 +317,7 @@
     "16625884:9",
     "16664301:0",
     "16752201:1",
+    "17261713:0",
     "1948151:0",
     "1948151:1",
     "1948151:2",
@@ -379,6 +388,7 @@
     "16625884:8",
     "16625884:9",
     "16664301:0",
+    "17261713:0",
     "1948151:2",
     "1948151:4",
     "800008:3"
@@ -414,8 +424,9 @@
    ]
   },
   "4.8/failed-call-in-a-succeeding-transaction": {
-   "cases": [],
-   "uncovered": "no committed fixture of this cell yet (a frame that fails and is caught, in a SUCCEEDED transaction)"
+   "cases": [
+    "17261713:0"
+   ]
   },
   "4.8/out-of-gas": {
    "cases": [],
