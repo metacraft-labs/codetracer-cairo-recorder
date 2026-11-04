@@ -101,6 +101,13 @@
             onchainPkgs.cargo
             onchainPkgs.rustfmt
             onchainPkgs.clippy
+            # `onchain/vendor-blockifier.sh`, which every onchain-* recipe runs first,
+            # downloads the blockifier crate with curl and patches it with
+            # `python3 blockifier-patch/apply.py` (stdlib only). Neither may be taken
+            # from the host: a host without python3 fails `just lint` / `just test`
+            # with "python3: command not found".
+            pkgs.curl
+            pkgs.python3
           ];
           shellHook = ''
             export PATH="${onchainPkgs.rustc}/bin:${onchainPkgs.cargo}/bin:${onchainPkgs.rustfmt}/bin:${onchainPkgs.clippy}/bin:$PATH"
