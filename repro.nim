@@ -84,6 +84,12 @@ import repro_project_dsl
 import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
 
+# The owning constructor of ``ct-print``. It lives in the sibling checkout this
+# repository's tests and cargo ``path`` dependencies already resolve.
+import "../codetracer-trace-format-nim/build_writer_artifacts"
+
+const traceFormatNimRoot = "../codetracer-trace-format-nim"
+
 ## Cairo corelib provisioning.
 ## Mirrors ``CAIRO_CORELIB_VERSION`` in ``windows/toolchain-versions.env``
 ## and the recorder's pin in ``Cargo.toml``'s ``cairo-lang-*`` crates.
@@ -108,8 +114,11 @@ package codetracer_cairo_recorder:
     "cargo >=1.85"
     # C compiler driver — rustc links through `cc`, and build scripts
     # (cc-rs, the Nim FFI) compile C. Declaring it puts its directory on
-    # every cargo edge's PATH. Windows links with MSVC instead.
-    when defined(linux):
+    # every cargo edge's PATH. Windows Cargo links with MSVC instead; the
+    # owning ct-print constructor (``build_writer_artifacts.buildCtPrint``)
+    # separately compiles with GCC on Windows, so ``gcc`` is declared there
+    # for that edge only (the Windows cargo edges do not register it).
+    when defined(linux) or defined(windows):
       "gcc"
     elif defined(macosx):
       "clang"
@@ -128,12 +137,40 @@ package codetracer_cairo_recorder:
     # static library into the cargo build (the FFI's C output
     # ``#include``s ``zstd.h`` and the CBOR+Zstd writer links libzstd).
     "zstd"
+    # zstd.h + libzstd for the sibling ct-print edge
+    # (``build_writer_artifacts.buildCtPrint`` compiles and links against
+    # them; ``zstd`` is the CLI only). It is one of the constructor's
+    # ``CtPrintToolSelectors``, next to the C compiler declared above: the
+    # constructor cannot provision a tool from inside ``build:``, so a
+    # recipe must declare each of them, and on POSIX it refuses one that
+    # does not.
+    when not defined(windows):
+      "zstd-dev"
+
+    # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
+    # build.rs fetches the FFI's requirements with git.
+    "git"
 
     # POSIX shell — drives the cairo-corelib provisioning edge and the
     # CLI-convention verification edge below, the same
     # ``bash tests/verify-cli-convention-no-silent-skip.sh`` step
     # ``just test`` runs after ``cargo test``.
     "sh"
+    "bash"
+    # The rest of what those two edges run. The corelib edge downloads
+    # (``curl``) and unpacks (``tar``, which execs ``gzip`` for ``-z``) the
+    # corelib tarball in a scratch directory (``mktemp``, ``mkdir``, ``rm``);
+    # the CLI-convention script resolves its own location (``dirname``) and
+    # matches the help text (``grep``). Each edge's PATH is built from these
+    # declarations.
+    "curl"
+    "tar"
+    "gzip"
+    "mktemp"
+    "mkdir"
+    "rm"
+    "dirname"
+    "grep"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
@@ -274,15 +311,34 @@ package codetracer_cairo_recorder:
       extraOutputs = @["target/debug/deps"],
       extraEnv = cairoCorelibEnv)
 
+    # ---- ``ct-print`` prerequisite ------------------------------------
+    #
+    # The tests decode their recordings with ``ct-print`` at the fixed
+    # sibling path ``../codetracer-trace-format-nim/ct-print`` (``.exe`` on
+    # Windows), and panic rather than skip when it is missing.
+    # ``just prepare-ci`` builds it before ``just test``; here it is an
+    # edge, constructed by the sibling's own ``buildCtPrint`` so the compile
+    # flags stay in the repository that owns them. The test-run edge orders
+    # after it and names the binary as an input, so a missing or rebuilt
+    # ``ct-print`` re-runs the tests.
+    #
+    # It runs after the test build because that build's
+    # ``codetracer_trace_writer_nim`` ``build.rs`` is what installs the
+    # sibling's nimble ``requires`` (``results``, ``stew``) into the nimble
+    # path this compile resolves them from.
+    let ctPrintBuild = buildCtPrint(traceFormatNimRoot,
+                                    after = @[testsBuild.action])
+
     let testsRun = cargo.test(
       locked = true,
       actionId = "codetracer-cairo-recorder.cargo-test-run",
-      after = @[testsBuild.action, corelibExtract],
+      after = @[testsBuild.action, corelibExtract, ctPrintBuild],
       extraInputs = @[
         "Cargo.toml", "Cargo.lock",
         "src", "tests", "test-programs",
         "target/debug/deps",
-        CairoCorelibMarker
+        CairoCorelibMarker,
+        ctPrintPath(traceFormatNimRoot)
       ],
       extraEnv = cairoCorelibEnv)
 
@@ -312,5 +368,28 @@ package codetracer_cairo_recorder:
         "Cargo.toml", "Cargo.lock", "src"
       ],
       cacheable = false)
+
+    # ---- Tool identities each edge runs --------------------------------
+    #
+    # A ``uses:`` declaration alone does not reach an edge: under typed
+    # provisioning an action's PATH is built from the tool identities
+    # registered on it. Every cargo edge builds ``codetracer_trace_writer_nim``,
+    # whose build.rs runs ``nimble install --depsOnly`` (which fetches with
+    # ``git``) and ``nim``, whose C backend is the C compiler; the C compiler
+    # also builds ``ring`` / ``zstd-sys`` through cc-rs and drives rustc's
+    # link step. The CLI check runs ``cargo build`` itself, so it takes the
+    # same set plus its script's own tools. The ``ct-print`` edge's tools are
+    # its constructor's (``buildCtPrint``), not declared here.
+    for action in [recorderBuild, testsBuild.action, testsRun.action, cliVerify]:
+      appendRegisteredActionToolIdentityRefs(action.id,
+        ["cargo", "rustc", "nim", "nimble", "git"])
+      when defined(linux):
+        appendRegisteredActionToolIdentityRefs(action.id, ["gcc"])
+      elif defined(macosx):
+        appendRegisteredActionToolIdentityRefs(action.id, ["clang"])
+    appendRegisteredActionToolIdentityRefs(cliVerify.id,
+      ["sh", "bash", "dirname", "grep"])
+    appendRegisteredActionToolIdentityRefs(corelibExtract.id,
+      ["sh", "curl", "tar", "gzip", "mktemp", "mkdir", "rm"])
 
     discard collect("test", @[testsRun.action, cliVerify])
