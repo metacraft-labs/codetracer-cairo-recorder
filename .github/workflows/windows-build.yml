@@ -3,6 +3,7 @@ on:
   push:
     branches: [main, dev, stable]
   pull_request:
+    branches-ignore: [agents]
 
 # Cancel superseded PR runs only: a new push to a PR makes its previous run
 # moot, and stale runs otherwise hold scarce self-hosted runners. Every other
@@ -44,6 +45,7 @@ jobs:
           env-flavor: windows-diy
           gh-token: ${{ steps.app-token.outputs.token }}
           siblings: |
+            codetracer
             codetracer-trace-format
             codetracer-trace-format-nim
 

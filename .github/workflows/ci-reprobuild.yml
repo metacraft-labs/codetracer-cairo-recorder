@@ -91,6 +91,18 @@ jobs:
         # Materialises the `test` collection.
         run: dev-exec repro test
 
+      - name: just prepare-ci (cross-check prerequisites)
+        # The legacy `just test` path needs what `ci.yml` sets up through the
+        # shared reusable-recorder-ci workflow's prepare step before it runs
+        # lint/test: `ct-print` built in the codetracer-trace-format-nim
+        # sibling, and the pinned Cairo corelib fetched into ./corelib with
+        # CAIRO_CORELIB_DIR exported through $GITHUB_ENV. The `repro test`
+        # step above does not provide either for `just test`: its corelib
+        # edge extracts under build/cairo-corelib/ and hands the path only to
+        # its own edges. Run here, after the repro steps, so they still prove
+        # the collections materialise without this legacy preparation.
+        run: dev-exec just prepare-ci
+
       - name: just build (cross-check)
         # Re-runs the legacy `just build` path inside the same env so
         # we catch silent divergences between `repro build` outputs

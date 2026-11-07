@@ -10,9 +10,13 @@ build:
 build-release:
   cargo build --release --locked
 
-test:
+# `onchain-test` is part of `test` so the shared CI workflow (which runs `just test`)
+# runs the on-chain replay's offline suite too: BlockTracer's Starknet path must not be
+# a suite that only runs when somebody remembers it (Recorder-Cairo CXP-CAIRO-2).
+test: onchain-test
   cargo test --locked
   bash tests/verify-cli-convention-no-silent-skip.sh
+  bash tests/test-fetch-cairo-corelib.sh
 
 t: test
 
@@ -22,7 +26,7 @@ test-rust:
 verify-cli-convention:
   bash tests/verify-cli-convention-no-silent-skip.sh
 
-lint:
+lint: onchain-lint
   cargo fmt --check
   cargo clippy --locked --all-targets -- -D warnings
   bash tests/verify-cli-convention-no-silent-skip.sh
@@ -33,38 +37,31 @@ format:
 fmt: format
 
 # Recorder-specific CI preparation, run by the shared reusable-recorder-ci
-# workflow (nixos-modules) after setup-dev-env and before lint/test. Builds the
-# Nim trace-writer sibling library + ct-print, and fetches the Cairo corelib
+# workflow (nixos-modules) after setup-dev-env and before lint/test. Builds
+# ct-print from the Nim trace-format sibling, and fetches the Cairo corelib
 # pinned in Cargo.toml. Exports the paths tests need to $GITHUB_ENV when running
 # under GitHub Actions (a no-op file otherwise). Shebang recipe so the shell
 # state persists across the steps.
-# TODO: fold the corelib + sibling lib into the flake devShell so local dev and
+# The trace writer's C ABI archive is NOT built here: the
+# codetracer_trace_writer_nim crate's build script compiles and links it with
+# the flags the library requires (one process heap, --threads:off).
+# TODO: fold the corelib + ct-print into the flake devShell so local dev and
 # CI share one path (per cross-repo-builds.md); then this recipe shrinks.
 prepare-ci:
   #!/usr/bin/env bash
   set -euo pipefail
-  # Build the Nim trace-writer sibling static lib + ct-print (Layout-A decode).
+  # Build ct-print (Layout-A decode) from the Nim trace-format sibling.
   (
     cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
     nimble install -y stew results
-    nim c --app:staticlib --mm:arc --noMain -d:release -p:src \
-      -o:libcodetracer_trace_writer.a src/codetracer_trace_writer_ffi.nim
     nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
   )
-  echo "CODETRACER_NIM_LIB_DIR=${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" >> "${GITHUB_ENV:-/dev/null}"
   # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
-  # $CAIRO_CORELIB_DIR).
-  CAIRO_VERSION=$(grep 'cairo-lang-compiler' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-  curl -fsSL \
-    "https://github.com/starkware-libs/cairo/archive/refs/tags/v${CAIRO_VERSION}.tar.gz" \
-    -o cairo-src.tar.gz
-  tar xzf cairo-src.tar.gz "cairo-${CAIRO_VERSION}/corelib"
-  mv "cairo-${CAIRO_VERSION}/corelib" corelib
-  rm -rf "cairo-${CAIRO_VERSION}" cairo-src.tar.gz
-  echo "CAIRO_CORELIB_DIR=$PWD/corelib/src" >> "${GITHUB_ENV:-/dev/null}"
+  # $CAIRO_CORELIB_DIR). Re-runnable; see the script.
+  bash scripts/fetch-cairo-corelib.sh
 
 # --- M13: Packaging UX Standardization ---
-# These recipes implement Repo-Requirements.md §2.8. The OS-packaged
+# These recipes implement Repo-Requirements.md §2.5. The OS-packaged
 # recorders share a uniform packaging surface: `bump-version` rewrites
 # Cargo.toml + packaging/recorder-metadata.yml; `build-package` shells
 # out to packaging/build-all.sh with the requested channel selector;
@@ -255,3 +252,82 @@ verify-scoop:
 
 verify-chocolatey:
     just verify-package chocolatey
+
+# --- On-chain replay: mined Starknet transactions, in StarkWare's own executor ---
+#
+# `onchain/` is a separate package with its own lock and its own Rust (cairo-lang
+# 2.19.x needs rustc >= 1.94; see flake.nix's `nixpkgs-onchain`), so these recipes
+# enter `nix develop .#onchain` themselves. `vendor-blockifier.sh` produces the patched
+# executor (crates.io tarball, checksum-verified, + onchain/blockifier-patch/) before
+# any cargo command. See onchain/README.md.
+
+onchain-build:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo build --release --locked'
+
+onchain-test:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo test --release --locked'
+
+onchain-lint:
+  nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings'
+
+# Record every transaction of one mainnet block (or only --tx ones) into OUT.
+#   just onchain-trace-block 16664437 https://api.cartridge.gg/x/starknet/mainnet ./out
+onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
+  onchain/target/release/codetracer-cairo-onchain trace-block {{BLOCK}} --rpc-url {{RPC}} -o {{OUT}} {{ARGS}}
+
+# ── The Voyager API key, sealed, never stored in the clear ────────────────────
+#
+# Starknet class sources (Recorder-Cairo CXP-CAIRO-4) come from Voyager, whose API
+# needs a key. It is handled the way metacraft-labs/infra handles every provider
+# credential: read from the terminal without echo, streamed straight into `age`, and
+# only the ciphertext is committed (onchain/secrets/voyager-api-key.age).
+#
+# RECIPIENTS are infra's committed, nix-derived recipient sets — the super-admins group
+# and high-mem-server, the host the pipeline is planned to run on — plus any EXTRA
+# `age1…` public keys given (e.g. an agent workstation's identity). RECIPIENTS points at
+# infra's `lib/recipients`, a sibling checkout by default.
+#
+#   just seal-voyager-api-key                       # then paste the key, Enter
+#   just seal-voyager-api-key ../infra/lib/recipients age14tyf…
+#
+# A run that needs the key decrypts it into the environment of that one process
+# (`just onchain-with-voyager-key <identity> -- <command>`); it is never written out.
+seal-voyager-api-key RECIPIENTS="../infra/lib/recipients" *EXTRA:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v age >/dev/null 2>&1 || { echo "age not on PATH." >&2; exit 1; }
+    r="{{RECIPIENTS}}"
+    for f in "$r/groups/super-admins.txt" "$r/hosts/high-mem-server.txt"; do
+      [ -s "$f" ] || { echo "no recipient set at $f — point RECIPIENTS at infra's lib/recipients." >&2; exit 1; }
+    done
+    args=(-R "$r/groups/super-admins.txt" -R "$r/hosts/high-mem-server.txt")
+    for k in {{EXTRA}}; do
+      case "$k" in age1*) args+=(-r "$k") ;; *) echo "extra recipient '$k' is not an age1… public key." >&2; exit 1 ;; esac
+    done
+    out="onchain/secrets/voyager-api-key.age"
+    if [ ! -t 0 ]; then exec </dev/tty; fi
+    echo "Paste the Voyager API key (input hidden), then press Enter." >&2
+    printf "Key: " >&2
+    IFS= read -r -s key; printf "\n" >&2
+    [ -n "$key" ] || { echo "Empty key; refusing to write $out." >&2; exit 1; }
+    mkdir -p "$(dirname "$out")"
+    tmp="$(mktemp "$out.tmp.XXXXXX")"
+    printf '%s' "$key" | age --encrypt "${args[@]}" --output "$tmp"
+    unset key
+    chmod 0644 "$tmp"; mv "$tmp" "$out"
+    echo "Sealed $out for $(( ${#args[@]} / 2 )) recipient argument(s). Commit it; it is ciphertext." >&2
+
+# Run one command with VOYAGER_API_KEY decrypted into ITS environment only.
+#   just onchain-with-voyager-key ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey -- <command…>
+onchain-with-voyager-key IDENTITY *CMD:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmd=({{CMD}}); [ "${cmd[0]:-}" = "--" ] && cmd=("${cmd[@]:1}")
+    VOYAGER_API_KEY="$(age --decrypt -i "{{IDENTITY}}" onchain/secrets/voyager-api-key.age)" exec "${cmd[@]}"
+
+# Fetch classes' verified sources from Voyager into OUT, under Source-Resolution §4a
+# (see onchain/voyager-class-source.sh). The answers are inputs to `bind-class`; a
+# binding, not the answer, is what a recording carries, so no rebuild calls Voyager.
+#   just onchain-voyager-class-source ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey OUT 0x78a3…
+onchain-voyager-class-source IDENTITY OUT +HASHES:
+    just onchain-with-voyager-key "{{IDENTITY}}" -- onchain/voyager-class-source.sh "{{OUT}}" {{HASHES}}

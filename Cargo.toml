@@ -28,6 +28,9 @@ cairo-lang-semantic = "2.17.0-rc.4"
 cairo-lang-lowering = "2.17.0-rc.4"
 cairo-lang-starknet = "2.17.0-rc.4"
 cairo-lang-utils = "2.17.0-rc.4"
+cairo-lang-casm = "2.17.0-rc.4"
+cairo-lang-runnable-utils = "2.17.0-rc.4"
+cairo-lang-sierra-generator = "2.17.0-rc.4"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
