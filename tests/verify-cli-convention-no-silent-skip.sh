@@ -28,7 +28,46 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # script stays focused on verification results.
 ( cd "${REPO_ROOT}" && cargo build --locked --quiet )
 
-BIN="${REPO_ROOT}/target/debug/codetracer-cairo-recorder"
+# Ask cargo where it put the binary instead of assuming `target/`.
+# `CARGO_TARGET_DIR` (set on the CI runners) or a `build.target-dir`
+# in a cargo config moves the output elsewhere.  A hard-coded
+# `target/debug` then either misses the fresh build entirely or, worse,
+# picks up a stale binary from an earlier local build and verifies that
+# instead of the code just compiled.  `cargo metadata` resolves every
+# one of those settings exactly as `cargo build` did:
+# https://doc.rust-lang.org/cargo/commands/cargo-metadata.html
+#
+# The JSON is parsed with a bash regex so the script needs no tool
+# beyond the ones its edge already registers.  JSON strings may carry
+# escapes; `\\` and `\"` are decoded, and any other escape (`\uXXXX`,
+# `\n`, ...) is refused loudly rather than guessed at.
+CARGO_METADATA="$( cd "${REPO_ROOT}" && cargo metadata --no-deps --format-version 1 )"
+TARGET_DIR_RE='"target_directory":"(([^"\\]|\\.)*)"'
+if [[ ! "${CARGO_METADATA}" =~ ${TARGET_DIR_RE} ]]; then
+  echo "ERROR: 'cargo metadata' reported no target_directory" >&2
+  exit 1
+fi
+TARGET_DIR_JSON="${BASH_REMATCH[1]}"
+# Decode left to right: a backslash always pairs with the character
+# after it, so the JSON `\\n` is a backslash followed by `n`, never a
+# newline.  Decoding with two global substitutions would get that wrong.
+SIMPLE_ESCAPE_RE='^\\(["\\])'
+TARGET_DIR=""
+while [[ -n "${TARGET_DIR_JSON}" ]]; do
+  if [[ "${TARGET_DIR_JSON}" =~ ${SIMPLE_ESCAPE_RE} ]]; then
+    TARGET_DIR+="${BASH_REMATCH[1]}"
+    TARGET_DIR_JSON="${TARGET_DIR_JSON:2}"
+  elif [[ "${TARGET_DIR_JSON:0:1}" == '\' ]]; then
+    echo "ERROR: unsupported JSON escape in cargo's target_directory" \
+      "at: ${TARGET_DIR_JSON}" >&2
+    exit 1
+  else
+    TARGET_DIR+="${TARGET_DIR_JSON:0:1}"
+    TARGET_DIR_JSON="${TARGET_DIR_JSON:1}"
+  fi
+done
+
+BIN="${TARGET_DIR}/debug/codetracer-cairo-recorder"
 if [[ ! -x "${BIN}" ]]; then
   echo "ERROR: recorder binary not found at ${BIN}" >&2
   exit 1

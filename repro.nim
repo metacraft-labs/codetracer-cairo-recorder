@@ -354,7 +354,8 @@ package codetracer_cairo_recorder:
     # dropped — reproducing the repo's full ``just test`` set. The script
     # itself does ``cargo build --locked --quiet`` (a no-op once the
     # recorder is built), then runs the freshly-built debug binary at
-    # ``target/debug/codetracer-cairo-recorder``; ``after`` the cargo
+    # ``<target dir>/debug/codetracer-cairo-recorder``, the target dir
+    # being the one ``cargo metadata`` reports; ``after`` the cargo
     # test-build edge guarantees that binary exists before the script
     # runs. Non-cacheable: the script inspects a runtime binary via
     # automatic monitoring and asserts on ``--help`` text, so it is
