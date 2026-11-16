@@ -139,13 +139,14 @@ package codetracer_cairo_recorder:
     "zstd"
     # zstd.h + libzstd for the sibling ct-print edge
     # (``build_writer_artifacts.buildCtPrint`` compiles and links against
-    # them; ``zstd`` is the CLI only). It is one of the constructor's
-    # ``CtPrintToolSelectors``, next to the C compiler declared above: the
-    # constructor cannot provision a tool from inside ``build:``, so a
-    # recipe must declare each of them, and on POSIX it refuses one that
-    # does not.
-    when not defined(windows):
-      "zstd-dev"
+    # them; ``zstd`` is the CLI only). The ct-print edge needs both on every
+    # host, so this is declared on Windows too: there reprobuild provisions
+    # ``zstd-dev`` from a tarball whose prefix holds ``zstd.h`` and a static
+    # ``libzstd.a``, which ct-print links with ``-lzstd``. The constructor
+    # cannot provision a tool from inside ``build:`` and refuses a recipe
+    # that omits any of ``CtPrintToolSelectors`` (the C compiler plus
+    # ``zstd-dev``), on Windows as on POSIX.
+    "zstd-dev"
 
     # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
     # build.rs fetches the FFI's requirements with git.
