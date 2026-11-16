@@ -40,24 +40,21 @@ fmt: format
 # workflow (nixos-modules) after setup-dev-env and before lint/test. Builds
 # ct-print from the Nim trace-format sibling, and fetches the Cairo corelib
 # pinned in Cargo.toml. Exports the paths tests need to $GITHUB_ENV when running
-# under GitHub Actions (a no-op file otherwise). Shebang recipe so the shell
-# state persists across the steps.
+# under GitHub Actions (a no-op file otherwise).
 # The trace writer's C ABI archive is NOT built here: the
 # codetracer_trace_writer_nim crate's build script compiles and links it with
 # the flags the library requires (one process heap, --threads:off).
+# A line-wise recipe, not a shebang one: neither step needs shell state from
+# the other, and on Windows just runs a `#!/usr/bin/env bash` recipe only
+# after translating the interpreter path with `cygpath`, which CI's activated
+# environment does not provide there.
 # TODO: fold the corelib + ct-print into the flake devShell so local dev and
 # CI share one path (per cross-repo-builds.md); then this recipe shrinks.
+# Line 1 builds ct-print (Layout-A decode) in the Nim trace-format sibling.
+# Line 2 fetches the Cairo corelib version pinned in Cargo.toml (the recorder
+# loads it via $CAIRO_CORELIB_DIR); it is re-runnable, see the script.
 prepare-ci:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  # Build ct-print (Layout-A decode) from the Nim trace-format sibling.
-  (
-    cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-    nimble install -y stew results
-    nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
-  )
-  # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
-  # $CAIRO_CORELIB_DIR). Re-runnable; see the script.
+  cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" && nimble install -y stew results && nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
   bash scripts/fetch-cairo-corelib.sh
 
 # --- M13: Packaging UX Standardization ---

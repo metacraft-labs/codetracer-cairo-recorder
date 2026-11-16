@@ -172,6 +172,21 @@ package codetracer_cairo_recorder:
     "rm"
     "dirname"
     "grep"
+    # ``scripts/fetch-cairo-corelib.sh``, which ``just prepare-ci`` runs in
+    # CI's cross-check, also reads the pinned version (``head``, ``sed``),
+    # compares the stamp (``cat``) and moves the extracted tree into place
+    # (``mv``). The activated environment's PATH holds only what is declared
+    # here and what the runner's PATH already has, so on Windows each must be
+    # declared.
+    "head"
+    "sed"
+    "cat"
+    "mv"
+    # just runs the Justfile recipes, which CI's cross-check steps call
+    # through `dev-exec` (`repro exec`), so it must be declared here: the
+    # activated environment's PATH is the runner's plus the declared tools,
+    # and the Windows runner has no `just`.
+    "just"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls
