@@ -5,7 +5,7 @@
 //! its ABI and nothing that maps a program counter to a Cairo source line — the Sierra
 //! debug info is not part of a declared class. So a step can be placed exactly at the
 //! instruction it executed, and not at a source line, until verified sources are
-//! resolved for the class (Recorder-Cairo CXP-CAIRO-4). The listing is built out of the
+//! resolved for the class by class hash (`source.rs`). The listing is built out of the
 //! bytecode itself, so it needs nothing recovered from anywhere, and every position in
 //! the recording points into it. A class with a proved build (`source.rs`) is listed
 //! with the build's names — functions, types, libfuncs — over the same instructions.

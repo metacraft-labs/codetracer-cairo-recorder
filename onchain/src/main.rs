@@ -927,8 +927,9 @@ fn trace_block(
             .and_then(|(i, _)| i.revert_error.as_ref().map(|r| r.to_string()));
         let label = format!("starknet-{}-{}", number, e.hash);
         // Only the files a step of THIS transaction is shown in: BlockTracer shows the
-        // source of the code that ran, not every file the class's build touched
-        // (Source-Resolution.md §8).
+        // source of the code that ran, not every file the class's build touched: published
+        // sources are licensed variously, so they are shown where used rather than
+        // re-hosted as a browsable corpus.
         let used: std::collections::BTreeSet<&PathBuf> = e
             .frames
             .iter()

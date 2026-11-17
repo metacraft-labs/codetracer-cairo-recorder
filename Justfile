@@ -10,9 +10,11 @@ build:
 build-release:
   cargo build --release --locked
 
-# `onchain-test` is part of `test` so the shared CI workflow (which runs `just test`)
-# runs the on-chain replay's offline suite too: BlockTracer's Starknet path must not be
-# a suite that only runs when somebody remembers it (Recorder-Cairo CXP-CAIRO-2).
+# `onchain-test` is part of `test` so that CI runs the on-chain replay's offline suite
+# on every change, not only when somebody remembers to: BlockTracer's Starknet traces
+# come from that replay, so a regression in it must fail the build like any other. The
+# Linux and macOS lanes of the reprobuild CI workflow run `just test`; its Windows
+# lanes run `just test-portable` (below), which leaves `onchain-test` out.
 test: onchain-test test-portable test-fetch-cairo-corelib
 
 # `test` minus its POSIX-only parts, for hosts without POSIX tooling (the
@@ -290,8 +292,8 @@ onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
 
 # ── The Voyager API key, sealed, never stored in the clear ────────────────────
 #
-# Starknet class sources (Recorder-Cairo CXP-CAIRO-4) come from Voyager, whose API
-# needs a key. It is handled the way metacraft-labs/infra handles every provider
+# Starknet class sources (a declared class's verified source) come from Voyager, whose
+# API needs a key. It is handled the way metacraft-labs/infra handles every provider
 # credential: read from the terminal without echo, streamed straight into `age`, and
 # only the ciphertext is committed (onchain/secrets/voyager-api-key.age).
 #
@@ -338,9 +340,10 @@ onchain-with-voyager-key IDENTITY *CMD:
     cmd=({{CMD}}); [ "${cmd[0]:-}" = "--" ] && cmd=("${cmd[@]:1}")
     VOYAGER_API_KEY="$(age --decrypt -i "{{IDENTITY}}" onchain/secrets/voyager-api-key.age)" exec "${cmd[@]}"
 
-# Fetch classes' verified sources from Voyager into OUT, under Source-Resolution §4a
-# (see onchain/voyager-class-source.sh). The answers are inputs to `bind-class`; a
-# binding, not the answer, is what a recording carries, so no rebuild calls Voyager.
+# Fetch classes' verified sources from Voyager into OUT, under the controls for an
+# attacker-directed fetch listed in onchain/voyager-class-source.sh. The answers are
+# inputs to `bind-class`; a binding, not the answer, is what a recording carries, so
+# no rebuild calls Voyager.
 #   just onchain-voyager-class-source ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey OUT 0x78a3…
 onchain-voyager-class-source IDENTITY OUT +HASHES:
     just onchain-with-voyager-key "{{IDENTITY}}" -- onchain/voyager-class-source.sh "{{OUT}}" {{HASHES}}

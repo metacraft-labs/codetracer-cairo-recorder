@@ -1,7 +1,7 @@
 {
  "format": "codetracer-cairo-onchain/divergence-corpus@1",
  "chain": "starknet-mainnet",
- "taxonomy": "codetracer-pm spec/Testing/Blockchain-Recorder-Test-Suites.md \u00a74; the selection rule is \u00a77",
+ "taxonomy": "cells are keyed by the coverage taxonomy for blockchain recorders: 4.1 protocol and fork eras, 4.2 transaction types, 4.3 system transactions, 4.4 precompiles and host calls, 4.5 contract creation, 4.6 proxies and upgrades, 4.7 nested calls and reentrancy, 4.8 reverts and out-of-resource, 4.9 maximum depth and truncation, 4.10 compiler and optimizer variants, 4.11 chain-specific semantics; the corpus holds at least one case per applicable cell, chosen for coverage rather than count",
  "measuredBy": "tests/offline.rs the_divergence_corpus_covers_exactly_what_it_declares \u2014 every measurable cell is recomputed from the replays and must equal this file",
  "cases": "`<block>:<txIndex>` for transactions, `<block>` for eras, a class hash for 4.10/sierra/*",
  "fixtures": [
@@ -17,7 +17,7 @@
   "highestOracleTier": "1 \u2014 every receipt fact the recorder counts (status, fee, gas vector, events, L2->L1 messages, call tree) \u2014 plus each block's whole state diff equal to the node's starknet_getStateUpdate. Tiers 2 and 3 (the header's receipt and state commitments) are not computed.",
   "fidelityLevelsAsserted": "per class, by the class-source tests: names (Cairo 2.6.3 builds), names + Cairo lines (builds with statement locations and republished sources), CASM only (unbound)",
   "productionDivergenceRate": "blocktracer tools/chain/measurements/starknet-replay-yield.json: 690 of 690 in range reproduced; 0 divergent",
-  "lastCanary": "none \u2014 no canary replay on an executor upgrade has been run (\u00a76)",
+  "lastCanary": "none \u2014 no canary replay on an executor upgrade has been run (a full corpus replay is due on every recorder change and every chain upgrade)",
   "eraSample": "mainnet versions sampled every 25,000 blocks from 501,514 to 16,770,646 on 2026-10-22 via api.cartridge.gg"
  },
  "cells": {
