@@ -10,12 +10,30 @@ build:
 build-release:
   cargo build --release --locked
 
-# `onchain-test` is part of `test` so the shared CI workflow (which runs `just test`)
-# runs the on-chain replay's offline suite too: BlockTracer's Starknet path must not be
-# a suite that only runs when somebody remembers it (Recorder-Cairo CXP-CAIRO-2).
-test: onchain-test
+# `onchain-test` is part of `test` so that CI runs the on-chain replay's offline suite
+# on every change, not only when somebody remembers to: BlockTracer's Starknet traces
+# come from that replay, so a regression in it must fail the build like any other. The
+# Linux and macOS lanes of the reprobuild CI workflow run `just test`; its Windows
+# lanes run `just test-portable` (below), which leaves `onchain-test` out.
+test: onchain-test test-portable test-fetch-cairo-corelib
+
+# `test` minus its POSIX-only parts, for hosts without POSIX tooling (the
+# Windows lanes of the reprobuild CI workflow run this; Linux and macOS run
+# `test`). Excluded, and why:
+#
+# - `onchain-test`: it builds and tests the on-chain tracer inside the
+#   separate `nix develop .#onchain` shell, and Windows hosts have no Nix.
+# - `test-fetch-cairo-corelib`: the test script uses `find`, which the build
+#   environment does not provide on Windows.
+#
+# Everything else `test` runs is here, in the same order.
+test-portable:
   cargo test --locked
   bash tests/verify-cli-convention-no-silent-skip.sh
+
+# POSIX-only: see `test-portable` above. Checks that
+# scripts/fetch-cairo-corelib.sh can be re-run over an existing ./corelib.
+test-fetch-cairo-corelib:
   bash tests/test-fetch-cairo-corelib.sh
 
 t: test
@@ -40,24 +58,21 @@ fmt: format
 # workflow (nixos-modules) after setup-dev-env and before lint/test. Builds
 # ct-print from the Nim trace-format sibling, and fetches the Cairo corelib
 # pinned in Cargo.toml. Exports the paths tests need to $GITHUB_ENV when running
-# under GitHub Actions (a no-op file otherwise). Shebang recipe so the shell
-# state persists across the steps.
+# under GitHub Actions (a no-op file otherwise).
 # The trace writer's C ABI archive is NOT built here: the
 # codetracer_trace_writer_nim crate's build script compiles and links it with
 # the flags the library requires (one process heap, --threads:off).
+# A line-wise recipe, not a shebang one: neither step needs shell state from
+# the other, and on Windows just runs a `#!/usr/bin/env bash` recipe only
+# after translating the interpreter path with `cygpath`, which CI's activated
+# environment does not provide there.
 # TODO: fold the corelib + ct-print into the flake devShell so local dev and
 # CI share one path (per cross-repo-builds.md); then this recipe shrinks.
+# Line 1 builds ct-print (Layout-A decode) in the Nim trace-format sibling.
+# Line 2 fetches the Cairo corelib version pinned in Cargo.toml (the recorder
+# loads it via $CAIRO_CORELIB_DIR); it is re-runnable, see the script.
 prepare-ci:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  # Build ct-print (Layout-A decode) from the Nim trace-format sibling.
-  (
-    cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim"
-    nimble install -y stew results
-    nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
-  )
-  # Fetch the Cairo corelib version pinned in Cargo.toml (recorder loads it via
-  # $CAIRO_CORELIB_DIR). Re-runnable; see the script.
+  cd "${GITHUB_WORKSPACE}/../codetracer-trace-format-nim" && nimble install -y stew results && nim c -d:release --mm:arc -p:src -o:ct-print src/codetracer_ct_print.nim
   bash scripts/fetch-cairo-corelib.sh
 
 # --- M13: Packaging UX Standardization ---
@@ -277,8 +292,8 @@ onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
 
 # ── The Voyager API key, sealed, never stored in the clear ────────────────────
 #
-# Starknet class sources (Recorder-Cairo CXP-CAIRO-4) come from Voyager, whose API
-# needs a key. It is handled the way metacraft-labs/infra handles every provider
+# Starknet class sources (a declared class's verified source) come from Voyager, whose
+# API needs a key. It is handled the way metacraft-labs/infra handles every provider
 # credential: read from the terminal without echo, streamed straight into `age`, and
 # only the ciphertext is committed (onchain/secrets/voyager-api-key.age).
 #
@@ -325,9 +340,10 @@ onchain-with-voyager-key IDENTITY *CMD:
     cmd=({{CMD}}); [ "${cmd[0]:-}" = "--" ] && cmd=("${cmd[@]:1}")
     VOYAGER_API_KEY="$(age --decrypt -i "{{IDENTITY}}" onchain/secrets/voyager-api-key.age)" exec "${cmd[@]}"
 
-# Fetch classes' verified sources from Voyager into OUT, under Source-Resolution §4a
-# (see onchain/voyager-class-source.sh). The answers are inputs to `bind-class`; a
-# binding, not the answer, is what a recording carries, so no rebuild calls Voyager.
+# Fetch classes' verified sources from Voyager into OUT, under the controls for an
+# attacker-directed fetch listed in onchain/voyager-class-source.sh. The answers are
+# inputs to `bind-class`; a binding, not the answer, is what a recording carries, so
+# no rebuild calls Voyager.
 #   just onchain-voyager-class-source ~/m/bt-cairo/.secrets/bt-cairo-arch.agekey OUT 0x78a3…
 onchain-voyager-class-source IDENTITY OUT +HASHES:
     just onchain-with-voyager-key "{{IDENTITY}}" -- onchain/voyager-class-source.sh "{{OUT}}" {{HASHES}}

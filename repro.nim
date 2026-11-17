@@ -139,13 +139,14 @@ package codetracer_cairo_recorder:
     "zstd"
     # zstd.h + libzstd for the sibling ct-print edge
     # (``build_writer_artifacts.buildCtPrint`` compiles and links against
-    # them; ``zstd`` is the CLI only). It is one of the constructor's
-    # ``CtPrintToolSelectors``, next to the C compiler declared above: the
-    # constructor cannot provision a tool from inside ``build:``, so a
-    # recipe must declare each of them, and on POSIX it refuses one that
-    # does not.
-    when not defined(windows):
-      "zstd-dev"
+    # them; ``zstd`` is the CLI only). The ct-print edge needs both on every
+    # host, so this is declared on Windows too: there reprobuild provisions
+    # ``zstd-dev`` from a tarball whose prefix holds ``zstd.h`` and a static
+    # ``libzstd.a``, which ct-print links with ``-lzstd``. The constructor
+    # cannot provision a tool from inside ``build:`` and refuses a recipe
+    # that omits any of ``CtPrintToolSelectors`` (the C compiler plus
+    # ``zstd-dev``), on Windows as on POSIX.
+    "zstd-dev"
 
     # ``nimble install --depsOnly`` in ``codetracer_trace_writer_nim``'s
     # build.rs fetches the FFI's requirements with git.
@@ -171,6 +172,21 @@ package codetracer_cairo_recorder:
     "rm"
     "dirname"
     "grep"
+    # ``scripts/fetch-cairo-corelib.sh``, which ``just prepare-ci`` runs in
+    # CI's cross-check, also reads the pinned version (``head``, ``sed``),
+    # compares the stamp (``cat``) and moves the extracted tree into place
+    # (``mv``). The activated environment's PATH holds only what is declared
+    # here and what the runner's PATH already has, so on Windows each must be
+    # declared.
+    "head"
+    "sed"
+    "cat"
+    "mv"
+    # just runs the Justfile recipes, which CI's cross-check steps call
+    # through `dev-exec` (`repro exec`), so it must be declared here: the
+    # activated environment's PATH is the runner's plus the declared tools,
+    # and the Windows runner has no `just`.
+    "just"
 
     # pkg-config + OpenSSL — openssl-sys consults pkg-config to find
     # OpenSSL on Linux/macOS. The Windows build uses the rustls-tls

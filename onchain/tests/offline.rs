@@ -244,7 +244,7 @@ fn control_a_mutated_call_tree_is_caught_by_the_differential() {
     assert_eq!(b["blockStateDiff"]["storageEntries"]["matches"], true);
 }
 
-// ── Source binding (Recorder-Cairo CXP-CAIRO-4) ─────────────────────────────────────
+// ── Source binding (verified source by class hash) ──────────────────────────────────
 //
 // `tests/fixtures/class-sources/` holds ONE binding, written by `bind-class` from a build
 // of argentlabs/argent-contracts-starknet @ account-0.4.0 (1352198956) with Scarb 2.6.3:
@@ -666,7 +666,7 @@ fn control_bind_class_refuses_a_build_whose_abi_renames_one_parameter() {
     assert!(!scratch_path("bind-abi").join("out.json").exists());
 }
 
-// ── An L1-initiated transaction (Recorder-Cairo CXP-CAIRO-4's awkward cases) ──────────
+// ── An L1-initiated transaction (an awkward case for source resolution) ──────────────
 //
 // Mainnet block 16,752,201 (Starknet 0.14.4) holds two transactions: index 0 is an
 // L1_HANDLER — a StarkGate ETH deposit, started by a message from the L1 bridge
@@ -795,8 +795,9 @@ fn the_l1_handler_blocks_classes_are_bound_from_voyagers_sources() {
 //
 // Mainnet block 16,625,884 (18 transactions): index 0 upgrades account 0x6d626c63…e867 to
 // Argent 0.4.0 (0x3607…927f) through `replace_class`; no other transaction changes a class.
-// Mainnet block 1,948,151 (5 transactions) lies inside Chain-Support-Matrix §1.3's
-// documented ~9,000-block hole, which this pipeline measured as no hole (CXP-CAIRO-1).
+// Mainnet block 1,948,151 (5 transactions) lies inside a reported ~9,000-block hole in
+// Starknet's historical replay coverage, which this pipeline measured as no hole: the
+// node it replays from answered at both edges of the hole and inside it.
 // Both transcripts recorded 2026-10-22 from api.cartridge.gg.
 
 fn trace_fixture(name: &str, block: &str) -> Value {
@@ -903,7 +904,7 @@ fn a_block_inside_the_documented_hole_reproduces() {
     }
 }
 
-// ── The divergence corpus (Recorder-Cairo CXP-CAIRO-4; Blockchain-Recorder-Test-Suites §4, §7)
+// ── The divergence corpus: one case per applicable cell of the recorder coverage taxonomy
 //
 // `corpus/starknet-divergence-corpus.json` declares every taxonomy cell applicable to
 // Starknet, and for each either the captured cases in it or why it is uncovered. This

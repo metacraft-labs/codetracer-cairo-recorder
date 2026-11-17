@@ -1,11 +1,12 @@
-//! Binding a class on chain to the build that produced it (Recorder-Cairo CXP-CAIRO-4).
+//! Binding a class on chain to the build that produced it, so a class can be shown with
+//! its verified source.
 //!
 //! A declared class carries no debug info, so on its own a pc maps to a Sierra statement
 //! and no further. A build of the class's published source DOES carry it — the names of
 //! every user function, type and libfunc, and from Cairo 2.8 on (with
 //! `add-statements-code-locations-debug-info`) a Cairo file:line per statement — but a
-//! build is a claim about the class, and Source-Resolution §4 makes that claim worth
-//! nothing until it is checked against the chain.
+//! build is a claim about the class, and a source shown beside a trace is worth nothing
+//! (worse, it misleads) until that claim is checked against the chain.
 //!
 //! THE CHECK IS ON THE SIERRA PROGRAM ITSELF, NOT ON A NAME. `bind-class` compares the
 //! build with the chain's own `getClass` answer component by component — the Sierra
@@ -109,7 +110,7 @@ fn entry_points(v: &Value) -> Result<BTreeMap<String, Vec<(Felt, u64)>>> {
 
 /// `bind-class`: compare a build with the chain's class and, only if every component
 /// agrees, write the binding. A disagreement is an error naming the component — the build
-/// is discarded (Source-Resolution §4, "No match"), not published with a caveat.
+/// is discarded and never displayed, not published with a caveat.
 pub fn bind(
     chain_class: &Path,
     built: &Path,

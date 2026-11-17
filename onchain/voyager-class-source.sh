@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fetch a Starknet class's verified source from Voyager, under Source-Resolution.md §4a.
+# Fetch a Starknet class's verified source from Voyager. The fetch is attacker-directed:
+# the class, and so what the provider returns for it, is chosen by whoever declared it.
 #
 #   VOYAGER_API_KEY=… voyager-class-source.sh OUTDIR CLASS_HASH…
 #   (normally through `just onchain-voyager-class-source`, which decrypts the key into
@@ -9,7 +10,7 @@
 # BEFORE anything parses it. What it holds is untrusted input: only `bind-class`'s
 # class-hash comparison decides whether a build of it is shown.
 #
-# The §4a controls, applied to the one endpoint this fetch is allowed to call:
+# The controls, applied to the one endpoint this fetch is allowed to call:
 #   - the provider is FIXED (public-api.voyager.online over https); no part of the URL
 #     comes from the chain except the class hash, which must be a felt;
 #   - the host is resolved once, every address is checked against the private, loopback,
