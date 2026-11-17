@@ -110,7 +110,10 @@ jobs:
         run: dev-exec just build
 
       - name: just test (cross-check)
-        run: dev-exec just test
+        # Windows lanes run `test-portable`: `test` minus the recipes that
+        # need POSIX-only tooling, each named with its reason in the
+        # Justfile. Linux and macOS run the full `test`.
+        run: dev-exec just ${{ matrix.os == 'windows' && 'test-portable' || 'test' }}
 
       # Diagnostics on failure. Three things below are load-bearing:
       #

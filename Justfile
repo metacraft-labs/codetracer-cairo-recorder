@@ -13,9 +13,25 @@ build-release:
 # `onchain-test` is part of `test` so the shared CI workflow (which runs `just test`)
 # runs the on-chain replay's offline suite too: BlockTracer's Starknet path must not be
 # a suite that only runs when somebody remembers it (Recorder-Cairo CXP-CAIRO-2).
-test: onchain-test
+test: onchain-test test-portable test-fetch-cairo-corelib
+
+# `test` minus its POSIX-only parts, for hosts without POSIX tooling (the
+# Windows lanes of the reprobuild CI workflow run this; Linux and macOS run
+# `test`). Excluded, and why:
+#
+# - `onchain-test`: it builds and tests the on-chain tracer inside the
+#   separate `nix develop .#onchain` shell, and Windows hosts have no Nix.
+# - `test-fetch-cairo-corelib`: the test script uses `find`, which the build
+#   environment does not provide on Windows.
+#
+# Everything else `test` runs is here, in the same order.
+test-portable:
   cargo test --locked
   bash tests/verify-cli-convention-no-silent-skip.sh
+
+# POSIX-only: see `test-portable` above. Checks that
+# scripts/fetch-cairo-corelib.sh can be re-run over an existing ./corelib.
+test-fetch-cairo-corelib:
   bash tests/test-fetch-cairo-corelib.sh
 
 t: test
