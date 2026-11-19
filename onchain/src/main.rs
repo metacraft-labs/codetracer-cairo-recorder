@@ -320,6 +320,30 @@ fn enumerate(rpc: &rpc::Rpc, from: u64, to: u64, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether a receipt's gas vector is ABSENT rather than measured, so the replay's gas is
+/// not compared against it.
+///
+/// A RECEIPT WHOSE GAS VECTOR IS NOT POPULATED IS NOT A MEASUREMENT. Measured on block
+/// 620,000 (Starknet 0.13.1): every receipt reports 0 for all three dimensions while
+/// charging a non-zero fee — which no execution can do — so the node did not record the
+/// vector for that era. Comparing the replay's gas against those zeros would publish 147
+/// "divergences" that are absences.
+///
+/// A fee is not the only witness. An L1 handler of the same era is charged nothing on L2
+/// (measured: block 501,514, Starknet 0.13.0, whose L1_HANDLER 0x6a555ac5…581a has fee 0
+/// and an all-zero vector beside a call tree of 8 entry points), so the node's OWN trace is
+/// the second: a transaction that ran an entry point consumed gas. Both witnesses are the
+/// chain's, never the replay's. The rule stays narrow: ALL THREE zero; one zero dimension
+/// beside a populated one is still compared.
+fn gas_vector_unpopulated(receipt: &Value, trace_root: &Value) -> bool {
+    let res = &receipt["execution_resources"];
+    ["l1_gas", "l1_data_gas", "l2_gas"]
+        .iter()
+        .all(|k| res[*k].as_u64() == Some(0))
+        && (hexu(&receipt["actual_fee"]["amount"]).unwrap_or(0) > 0
+            || !trace_calls(trace_root).is_empty())
+}
+
 fn hexu(v: &Value) -> Option<u128> {
     v.as_str()
         .and_then(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -653,18 +677,8 @@ fn trace_block(
                     json!(hexu(&r["actual_fee"]["amount"]).map(|v| v.to_string())),
                     json!(info.receipt.fee.0.to_string()),
                 ));
-                // A RECEIPT WHOSE GAS VECTOR IS NOT POPULATED IS NOT A MEASUREMENT. Measured
-                // on block 620,000 (Starknet 0.13.1): every receipt reports 0 for all three
-                // dimensions while charging a non-zero fee — which no execution can do — so
-                // the node did not record the vector for that era. Comparing the replay's
-                // gas against those zeros would publish 147 "divergences" that are absences.
-                // The rule is narrow on purpose: ALL THREE zero AND a non-zero fee; one zero
-                // dimension beside a populated one is still compared.
                 let res = &r["execution_resources"];
-                let unpopulated = ["l1_gas", "l1_data_gas", "l2_gas"]
-                    .iter()
-                    .all(|k| res[*k].as_u64() == Some(0))
-                    && hexu(&r["actual_fee"]["amount"]).unwrap_or(0) > 0;
+                let unpopulated = gas_vector_unpopulated(r, &trace_root);
                 for (field, key, replayed) in [
                     ("l2Gas", "l2_gas", info.receipt.gas.l2_gas.0),
                     ("l1DataGas", "l1_data_gas", info.receipt.gas.l1_data_gas.0),
@@ -674,7 +688,7 @@ fn trace_block(
                         facts.push(json!({
                             "field": field, "published": res[key], "replayed": replayed,
                             "matches": null,
-                            "notMeasured": "the receipt's gas vector is all zero beside a non-zero fee: the node did not populate it for this era",
+                            "notMeasured": "the receipt's gas vector is all zero beside a non-zero fee or an entry point the node traced: the node did not populate it for this era",
                         }));
                     } else {
                         facts.push(fact(field, json!(res[key]), json!(replayed)));
@@ -1332,4 +1346,51 @@ fn probe_floor(rpc: &rpc::Rpc) -> Result<Value> {
         "binds": "executor",
         "tipAtProbe": tip,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ENTRY: &str = "0x2";
+
+    fn receipt(fee: &str, l1: u64, l2: u64) -> Value {
+        json!({
+            "actual_fee": { "amount": fee, "unit": "WEI" },
+            "execution_resources": { "l1_gas": l1, "l1_data_gas": 0, "l2_gas": l2 },
+        })
+    }
+
+    fn l1_handler_trace() -> Value {
+        json!({
+            "type": "L1_HANDLER",
+            "function_invocation": {
+                "contract_address": "0x1", "class_hash": ENTRY, "entry_point_selector": "0x3",
+                "calls": [],
+            },
+        })
+    }
+
+    #[test]
+    fn an_all_zero_vector_beside_a_fee_or_a_traced_call_is_not_a_measurement() {
+        // The 0.13.1 invoke: a fee and nothing else.
+        assert!(gas_vector_unpopulated(&receipt("0x10", 0, 0), &Value::Null));
+        // The 0.13.0 L1 handler: no fee, but the node traced an entry point.
+        assert!(gas_vector_unpopulated(
+            &receipt("0x0", 0, 0),
+            &l1_handler_trace()
+        ));
+    }
+
+    #[test]
+    fn control_a_populated_dimension_or_no_witness_is_still_compared() {
+        // One populated dimension: the vector was recorded, so its zeros are readings.
+        assert!(!gas_vector_unpopulated(
+            &receipt("0x0", 0, 820_000),
+            &l1_handler_trace()
+        ));
+        // All zero, no fee and no traced call: nothing says the transaction ran, so the
+        // zeros are compared rather than excused.
+        assert!(!gas_vector_unpopulated(&receipt("0x0", 0, 0), &Value::Null));
+    }
 }
