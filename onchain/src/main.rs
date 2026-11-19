@@ -53,6 +53,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// List the blocks and transactions of a bounded historic range, in chain order, and
+    /// check the count: the transaction rows actually enumerated
+    /// (`starknet_getBlockWithTxHashes`) against each block's own figure
+    /// (`starknet_getBlockTransactionCount`), two separate answers from the node. A
+    /// disagreement, or a block in the range that is not answered for, exits 1.
+    Enumerate {
+        /// First block of the range, inclusive.
+        from: u64,
+        /// Last block of the range, inclusive.
+        to: u64,
+        #[arg(long)]
+        rpc_url: Option<String>,
+        #[arg(long)]
+        transcript_in: Option<PathBuf>,
+        #[arg(long)]
+        transcript_out: Option<PathBuf>,
+        /// Where to write the ordered list and the count (JSON).
+        #[arg(short = 'o', long)]
+        out: PathBuf,
+    },
     /// Re-execute a whole block and record its transactions.
     TraceBlock {
         block: u64,
@@ -116,6 +136,29 @@ enum Command {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Enumerate {
+            from,
+            to,
+            rpc_url,
+            transcript_in,
+            transcript_out,
+            out,
+        } => {
+            let rpc = match (&transcript_in, &rpc_url) {
+                (Some(p), _) => {
+                    let (label, t) = transcript::read(p)?;
+                    rpc::Rpc::replaying(&label, t)
+                }
+                (None, Some(u)) => rpc::Rpc::new(u),
+                (None, None) => bail!("--rpc-url or --transcript-in is required"),
+            };
+            let r = enumerate(&rpc, from, to, &out);
+            if let Some(p) = transcript_out {
+                let n = transcript::write(&p, rpc.url(), &rpc.transcript())?;
+                eprintln!("transcript: {n} answer(s) -> {}", p.display());
+            }
+            r
+        }
         Command::TraceBlock {
             block,
             rpc_url,
@@ -200,6 +243,81 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The most blocks one `enumerate` may span: the range is BOUNDED by construction.
+const ENUMERATE_MAX_BLOCKS: u64 = 10_000;
+
+fn enumerate(rpc: &rpc::Rpc, from: u64, to: u64, out: &Path) -> Result<()> {
+    if to < from {
+        bail!("enumerate {from}..={to}: the range is empty");
+    }
+    if to - from + 1 > ENUMERATE_MAX_BLOCKS {
+        bail!("enumerate {from}..={to}: more than {ENUMERATE_MAX_BLOCKS} blocks");
+    }
+    let mut rows = vec![];
+    let mut blocks = vec![];
+    let mut stated_sum = 0u64;
+    let mut disagree = vec![];
+    for b in from..=to {
+        let id = json!([{ "block_number": b }]);
+        let blk = rpc.call("starknet_getBlockWithTxHashes", id.clone())?;
+        let hashes = blk["transactions"]
+            .as_array()
+            .ok_or_else(|| eyre!("block {b}: no transaction list"))?;
+        let stated = rpc
+            .call("starknet_getBlockTransactionCount", id)?
+            .as_u64()
+            .ok_or_else(|| eyre!("block {b}: the transaction count is not a number"))?;
+        stated_sum += stated;
+        if stated != hashes.len() as u64 {
+            disagree.push(format!(
+                "block {b}: its count is {stated} but {} row(s) enumerated",
+                hashes.len()
+            ));
+        }
+        for (i, h) in hashes.iter().enumerate() {
+            let h = h
+                .as_str()
+                .ok_or_else(|| eyre!("block {b} index {i}: a hash that is not a string"))?;
+            rows.push(json!({ "block": b, "index": i, "txHash": h }));
+        }
+        blocks.push(json!({
+            "block": b,
+            "blockHash": blk["block_hash"],
+            "starknetVersion": blk["starknet_version"],
+            "transactionCount": stated,
+            "enumerated": hashes.len(),
+        }));
+    }
+    let agree = disagree.is_empty();
+    let doc = json!({
+        "format": "codetracer-cairo-onchain/enumeration@1",
+        "endpoint": rpc.url(),
+        "from": from,
+        "to": to,
+        "blocks": blocks.len(),
+        "transactions": rows.len(),
+        "statedSum": stated_sum,
+        "agree": agree,
+        "disagreements": disagree,
+        "perBlock": blocks,
+        "rows": rows,
+    });
+    std::fs::write(out, serde_json::to_string_pretty(&doc)? + "\n")?;
+    eprintln!(
+        "enumerate {from}..={to}: {} block(s), {} transaction(s); the blocks' own counts sum to {stated_sum} -> {}",
+        doc["blocks"],
+        doc["transactions"],
+        if agree { "AGREE" } else { "DISAGREE" }
+    );
+    for d in &disagree {
+        eprintln!("  {d}");
+    }
+    if !agree {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn hexu(v: &Value) -> Option<u128> {

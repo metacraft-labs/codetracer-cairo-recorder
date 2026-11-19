@@ -1158,3 +1158,89 @@ fn run_at(transcript: &Path, block: &str, out: &Path) -> Value {
     let _ = std::fs::remove_dir_all(out);
     b
 }
+
+fn enumerate_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/enumerate-16664296")
+}
+
+fn run_enumerate(transcript: &Path, name: &str) -> (std::process::Output, Option<Value>) {
+    let out = scratch(name);
+    std::fs::create_dir_all(&out).unwrap();
+    let file = out.join("enumeration.json");
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["enumerate", "16664296", "16664305", "--transcript-in"])
+        .arg(transcript)
+        .arg("-o")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let doc = std::fs::read_to_string(&file)
+        .ok()
+        .map(|t| serde_json::from_str(&t).unwrap());
+    let _ = std::fs::remove_dir_all(&out);
+    (o, doc)
+}
+
+/// Ten blocks around the Ekubo transaction's: every row the node listed is counted, and
+/// the count is checked against the blocks' own figures rather than reported alone.
+#[test]
+fn a_bounded_range_enumerates_and_its_count_agrees() {
+    let (o, doc) = run_enumerate(&enumerate_fixture(), "enumerate-ok");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let d = doc.unwrap();
+    assert_eq!(
+        (d["blocks"].as_u64(), d["transactions"].as_u64()),
+        (Some(10), Some(26))
+    );
+    assert_eq!(d["statedSum"], 26);
+    assert_eq!(d["agree"], true);
+    // The order is the chain's: the fixture transaction is block 16,664,301's only row.
+    let rows: Vec<&Value> = d["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["block"] == 16664301)
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["txHash"],
+        "0x295683d081359be8f7b3d2f7384d2e2c56bf683c14543cfb5b1f6729849c79d"
+    );
+}
+
+/// CONTROL: one hash taken out of one block's listing. The enumeration is then short by
+/// one, and that shows as a disagreement naming the block, with exit 1 — not as a
+/// smaller number with nothing to compare it against.
+#[test]
+fn control_a_short_listing_is_a_disagreement_naming_its_block() {
+    use std::io::Write;
+    let t = scratch("enumerate-short-transcript");
+    copy_dir(&enumerate_fixture(), &t);
+    let idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(t.join("index.json")).unwrap()).unwrap();
+    let f = idx["answers"][r#"starknet_getBlockWithTxHashes [{"block_number":16664297}]"#]
+        .as_str()
+        .expect("the fixture holds block 16,664,297's listing")
+        .to_string();
+    let mut a = gz_json(&t.join("answers").join(&f));
+    let removed = a["result"]["transactions"].as_array_mut().unwrap().pop();
+    assert!(removed.is_some());
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(a.to_string().as_bytes()).unwrap();
+    std::fs::write(t.join("answers").join(&f), gz.finish().unwrap()).unwrap();
+
+    let (o, doc) = run_enumerate(&t, "enumerate-short");
+    let _ = std::fs::remove_dir_all(&t);
+    assert_eq!(o.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("DISAGREE"), "{err}");
+    assert!(
+        err.contains("block 16664297: its count is 6 but 5 row(s) enumerated"),
+        "{err}"
+    );
+    let d = doc.unwrap();
+    assert_eq!(
+        (d["transactions"].as_u64(), d["statedSum"].as_u64()),
+        (Some(25), Some(26))
+    );
+}
