@@ -1094,3 +1094,67 @@ fn the_divergence_corpus_covers_exactly_what_it_declares() {
         problems.join("\n")
     );
 }
+
+/// An invoke that carries `proof_facts`, which the endpoint serves only when asked
+/// (`INCLUDE_PROOF_FACTS`). Block 18,220,833's third transaction carries 9, and its
+/// account's multicall fails with EMPTY_PROOF_FACTS when replayed without them.
+#[test]
+fn an_invoke_with_proof_facts_reproduces() {
+    let b = trace_fixture("mainnet-18220833", "18220833");
+    assert_eq!(
+        (b["transactions"].as_u64(), b["replayed"].as_u64()),
+        (Some(3), Some(3)),
+        "{b:#}"
+    );
+    for k in ["storageEntries", "nonces", "classHashes"] {
+        assert_eq!(b["blockStateDiff"][k]["matches"], true, "{k}");
+    }
+    assert_eq!(b["proofFactsRequested"], true);
+}
+
+/// CONTROL: the same transcript with the block's answer filed under the PLAIN request
+/// only, as a transcript recorded before the flag holds it. The run falls back to that
+/// request and says so in `proofFactsRequested`, rather than failing or claiming the
+/// flagged answer. (That a replay WITHOUT the facts diverges was measured live: the third
+/// transaction reverts with EMPTY_PROOF_FACTS and the block is 2/3. It cannot be replayed
+/// from this transcript, whose state prefetch was asked with the facts in the bodies.)
+#[test]
+fn control_a_transcript_without_the_flagged_request_falls_back_and_says_so() {
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mainnet-18220833");
+    let t = scratch("plain-block-request-transcript");
+    copy_dir(&fx, &t);
+    let idx_path = t.join("index.json");
+    let mut idx: Value =
+        serde_json::from_str(&std::fs::read_to_string(&idx_path).unwrap()).unwrap();
+    let answers = idx["answers"].as_object_mut().unwrap();
+    let file = answers
+        .remove(
+            r#"starknet_getBlockWithReceipts [{"block_number":18220833},["INCLUDE_PROOF_FACTS"]]"#,
+        )
+        .expect("the fixture holds the flagged request");
+    answers.insert(
+        r#"starknet_getBlockWithReceipts [{"block_number":18220833}]"#.to_string(),
+        file,
+    );
+    std::fs::write(&idx_path, idx.to_string()).unwrap();
+    let out = scratch("plain-block-request-out");
+    let b = run_at(&t, "18220833", &out);
+    assert_eq!(b["proofFactsRequested"], false);
+    assert_eq!(b["replayed"].as_u64(), Some(3), "{b:#}");
+    let _ = std::fs::remove_dir_all(&t);
+}
+
+fn run_at(transcript: &Path, block: &str, out: &Path) -> Value {
+    let o = Command::new(env!("CARGO_BIN_EXE_codetracer-cairo-onchain"))
+        .args(["trace-block", block, "--transcript-in"])
+        .arg(transcript)
+        .arg("-o")
+        .arg(out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let b =
+        serde_json::from_str(&std::fs::read_to_string(out.join("block.json")).unwrap()).unwrap();
+    let _ = std::fs::remove_dir_all(out);
+    b
+}

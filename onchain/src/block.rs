@@ -40,6 +40,11 @@ pub struct Block {
     pub txs: Vec<(String, Value, Value)>,
     /// Header gas prices that were zero and were substituted with the minimum.
     pub substituted_gas_prices: Vec<String>,
+    /// Whether the bodies came with their `proof_facts` (`INCLUDE_PROOF_FACTS`). False
+    /// only when the endpoint or the transcript could not answer the flagged request:
+    /// an invoke that carried proof facts then replays without them, and its effects
+    /// comparison is what shows it.
+    pub proof_facts_requested: bool,
 }
 
 /// One header gas price. A ZERO price — which headers carry for dimensions the era did
@@ -60,10 +65,25 @@ fn gas(v: &Value, name: &str, substituted: &mut Vec<String>) -> Result<NonzeroGa
 }
 
 pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
-    let header = rpc.call(
+    // An invoke's `proof_facts` are served only when asked for (spec 0.10), and a
+    // contract may read them through `get_execution_info`: replayed without them, a
+    // transaction the chain ran can revert (measured: block 18,197,941, whose first
+    // transaction carries 9 and reverts here with EMPTY_PROOF_FACTS without the flag).
+    // An endpoint that predates the flag, or a transcript recorded before it, gets the
+    // plain request instead, and the block says which one it got.
+    let (header, proof_facts_requested) = match rpc.answer(
         "starknet_getBlockWithReceipts",
-        json!([{ "block_number": number }]),
-    )?;
+        json!([{ "block_number": number }, ["INCLUDE_PROOF_FACTS"]]),
+    ) {
+        Ok(crate::rpc::Answer::Ok(v)) => (v, true),
+        _ => (
+            rpc.call(
+                "starknet_getBlockWithReceipts",
+                json!([{ "block_number": number }]),
+            )?,
+            false,
+        ),
+    };
     let sv = header["starknet_version"]
         .as_str()
         .unwrap_or("")
@@ -140,6 +160,7 @@ pub fn fetch_block(rpc: &Rpc, number: u64) -> Result<Block> {
         starknet_version: sv,
         txs,
         substituted_gas_prices: sub,
+        proof_facts_requested,
     })
 }
 

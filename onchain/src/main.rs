@@ -1039,6 +1039,7 @@ fn trace_block(
         "chain": chain_facts(rpc, &blk)?,
         "floorProbe": if probe { probe_floor(rpc)? } else { Value::Null },
         "zeroGasPricesSubstituted": blk.substituted_gas_prices,
+        "proofFactsRequested": blk.proof_facts_requested,
         "transactions": blk.txs.len(),
         "replayed": replayed,
         "recorded": recorded,
