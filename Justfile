@@ -286,7 +286,7 @@ onchain-lint:
   nix develop .#onchain --command bash -c 'cd onchain && ./vendor-blockifier.sh && cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings'
 
 # Record every transaction of one mainnet block (or only --tx ones) into OUT.
-#   just onchain-trace-block 16664437 https://api.cartridge.gg/x/starknet/mainnet ./out
+#   just onchain-trace-block 16664437 https://starknet-rpc.publicnode.com ./out
 onchain-trace-block BLOCK RPC OUT *ARGS: onchain-build
   onchain/target/release/codetracer-cairo-onchain trace-block {{BLOCK}} --rpc-url {{RPC}} -o {{OUT}} {{ARGS}}
 
